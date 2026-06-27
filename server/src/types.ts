@@ -1,0 +1,94 @@
+export interface AgentTrigger {
+  type: "price_below";
+  threshold: number;
+  currency: "SGD";
+}
+
+export interface Agent {
+  agentId: string;
+  name: string;
+  product: string;
+  quantity: number;
+  unit: string;
+  trigger: AgentTrigger;
+  action: "auto_purchase";
+  status: "ready" | "running" | "completed";
+  prompt: string;
+  createdAt: string;
+}
+
+export interface ScrapeResult {
+  source: "exa" | "exa-cached" | "fallback";
+  supplier: string;
+  product: string;
+  price: number;
+  currency: "SGD";
+  url: string;
+  matched: boolean;
+  highlights?: string[];
+}
+
+export interface PayNowPayload {
+  scheme: string;
+  messageType: string;
+  transactionRef: string;
+  amount: { value: number; currency: string };
+  creditor: { name: string; uen: string; proxyType: string };
+  structuredRemittance: {
+    invoiceNumber: string;
+    lineItems: Array<{
+      description: string;
+      quantity: number;
+      unit: string;
+      unitPrice: number;
+    }>;
+    reconciliationRef: string;
+    categoryCode: string;
+  };
+  agentMetadata: {
+    platform: string;
+    agentId: string;
+    triggerReason: string;
+    scrapeProvider: string;
+  };
+  status: string;
+  settledAt: string;
+}
+
+export interface Transaction {
+  id: string;
+  agentId: string;
+  agentName: string;
+  description: string;
+  amount: number;
+  currency: "SGD";
+  status: "completed" | "pending";
+  source: string;
+  url?: string;
+  paynowPayload?: PayNowPayload;
+  createdAt: string;
+}
+
+export interface ActivityEvent {
+  runId: string;
+  step: string;
+  message: string;
+  status: "pending" | "running" | "done" | "error";
+  data?: unknown;
+  timestamp: string;
+}
+
+export interface ParsedAgentConfig {
+  name: string;
+  product: string;
+  quantity: number;
+  unit: string;
+  trigger: AgentTrigger;
+}
+
+export interface DashboardState {
+  balance: number;
+  currency: "SGD";
+  agents: Agent[];
+  transactions: Transaction[];
+}
