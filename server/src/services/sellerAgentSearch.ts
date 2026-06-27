@@ -36,7 +36,11 @@ function scoreListing(agent: Agent, listing: SellerListing): number {
   return base + bonus + 8;
 }
 
-export function searchSellerAgentCatalog(agent: Agent, limit = 8): SellerAgentCandidate[] {
+export function searchSellerAgentCatalog(
+  agent: Agent,
+  limit = 8,
+  opts?: { exaPriceFloor?: number }
+): SellerAgentCandidate[] {
   const sellerAgent = getOrCreateSellerAgent(agent);
   const results: SellerAgentCandidate[] = [];
 
@@ -44,10 +48,15 @@ export function searchSellerAgentCatalog(agent: Agent, limit = 8): SellerAgentCa
     if (!listing.inStock) continue;
     if (!matchesProductKeywords(agent, `${listing.title} ${listing.keywords.join(" ")}`, listing.url)) continue;
 
+    let listingPrice = listing.listingPriceSgd;
+    if (opts?.exaPriceFloor && opts.exaPriceFloor > 0) {
+      listingPrice = bumpListingPriceAboveFloor(listingPrice, listing.packQuantity, agent, opts.exaPriceFloor);
+    }
+
     results.push({
       url: listing.url,
       title: listing.title,
-      listingPrice: listing.listingPriceSgd,
+      listingPrice,
       packQuantity: listing.packQuantity,
       source: "seller-agent",
       score: scoreListing(agent, listing),
@@ -59,6 +68,23 @@ export function searchSellerAgentCatalog(agent: Agent, limit = 8): SellerAgentCa
 
   results.sort((a, b) => b.score - a.score);
   return results.slice(0, limit);
+}
+
+/** Ensure seller-agent total order cost sits above Exa so live web wins when both exist */
+function bumpListingPriceAboveFloor(
+  listingPrice: number,
+  packQuantity: number,
+  agent: Agent,
+  exaFloorTotal: number
+): number {
+  const cap = agent.trigger.threshold * 2;
+  if (exaFloorTotal > cap) return listingPrice;
+
+  const packsNeeded = Math.max(1, Math.ceil(agent.quantity / packQuantity));
+  const currentTotal = packsNeeded * listingPrice;
+  const targetTotal = Math.min(exaFloorTotal * 1.15 + 0.5, cap);
+  if (currentTotal >= targetTotal) return listingPrice;
+  return Math.round((targetTotal / packsNeeded) * 100) / 100;
 }
 
 export function searchSellerAgentCatalogByQuery(

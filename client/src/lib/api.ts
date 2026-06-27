@@ -87,6 +87,9 @@ export interface UpdateInventoryResult {
   runId?: string;
   agentId?: string;
   agentName?: string;
+  agent?: Agent;
+  autoLinked?: boolean;
+  agentCreated?: boolean;
   message?: string;
 }
 

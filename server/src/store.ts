@@ -125,7 +125,7 @@ export function updateInventorySettings(settings: Partial<InventorySettings>): I
 
 export function updateInventoryItem(
   itemId: string,
-  patch: Partial<Pick<InventoryItem, "currentStock" | "reorderThreshold">>
+  patch: Partial<Pick<InventoryItem, "currentStock" | "reorderThreshold" | "linkedAgentId">>
 ): InventoryItem | null {
   const idx = store.inventory.findIndex((item) => item.id === itemId);
   if (idx < 0) return null;
@@ -133,13 +133,83 @@ export function updateInventoryItem(
   return { ...store.inventory[idx] };
 }
 
+function normalizeProduct(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function productsMatch(a: string, b: string): boolean {
+  const na = normalizeProduct(a);
+  const nb = normalizeProduct(b);
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
+
+export function findAgentForInventoryProduct(product: string): Agent | undefined {
+  return store.agents.find(
+    (a) => productsMatch(a.product, product) && a.status !== "running"
+  );
+}
+
+export function linkInventoryToAgent(itemId: string, agentId: string): InventoryItem | null {
+  return updateInventoryItem(itemId, { linkedAgentId: agentId });
+}
+
+function defaultRestockQuantity(item: InventoryItem): number {
+  return Math.max(item.reorderThreshold, 25);
+}
+
+export function createRestockAgentForInventory(item: InventoryItem): Agent {
+  const quantity = defaultRestockQuantity(item);
+  const agent: Agent = {
+    agentId: `agt_${crypto.randomUUID().slice(0, 8)}`,
+    name: `${item.product.replace(/\b\w/g, (c) => c.toUpperCase())} Restock Agent`,
+    product: item.product,
+    quantity,
+    unit: item.unit,
+    trigger: { type: "price_below", threshold: 15, currency: "SGD" },
+    action: "auto_purchase",
+    status: "ready",
+    prompt: `Auto-restock ${item.product} when inventory drops to ${item.reorderThreshold} ${item.unit} or below. Buy ${quantity} ${item.unit} if total price is under $15.`,
+    createdAt: new Date().toISOString(),
+  };
+  addAgent(agent);
+  linkInventoryToAgent(item.id, agent.agentId);
+  return agent;
+}
+
+/** Find, match, or spawn a buyer agent for inventory auto-restock */
+export function resolveRestockAgent(item: InventoryItem): {
+  agent: Agent;
+  autoLinked: boolean;
+  created: boolean;
+} {
+  if (item.linkedAgentId) {
+    const linked = store.agents.find((a) => a.agentId === item.linkedAgentId);
+    if (linked) return { agent: linked, autoLinked: false, created: false };
+  }
+
+  const matched = findAgentForInventoryProduct(item.product);
+  if (matched) {
+    linkInventoryToAgent(item.id, matched.agentId);
+    return { agent: matched, autoLinked: true, created: false };
+  }
+
+  const created = createRestockAgentForInventory(item);
+  return { agent: created, autoLinked: true, created: true };
+}
+
 export function getInventoryItem(itemId: string): InventoryItem | undefined {
   return store.inventory.find((item) => item.id === itemId);
 }
 
 export function restockByAgent(agentId: string, quantity: number): void {
-  const item = store.inventory.find((i) => i.linkedAgentId === agentId);
+  const agent = store.agents.find((a) => a.agentId === agentId);
+  const item =
+    store.inventory.find((i) => i.linkedAgentId === agentId) ??
+    (agent ? store.inventory.find((i) => productsMatch(i.product, agent.product)) : undefined);
   if (item) {
     item.currentStock += quantity;
+    if (!item.linkedAgentId) {
+      item.linkedAgentId = agentId;
+    }
   }
 }

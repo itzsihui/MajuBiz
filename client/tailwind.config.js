@@ -7,6 +7,7 @@ export default {
         brand: {
           50: "#f5f3ff",
           100: "#ede9fe",
+          300: "#a5b4fc",
           500: "#6366f1",
           600: "#4f46e5",
           700: "#4338ca",

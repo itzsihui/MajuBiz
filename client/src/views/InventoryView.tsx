@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, Loader2, Package, Save } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ListTree, Loader2, Package, Save } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { Agent, DashboardState, InventoryItem } from "../lib/api";
 import { saveInventoryItem, updateInventorySettings } from "../lib/api";
@@ -8,13 +8,23 @@ interface DraftValues {
   reorderThreshold: number;
 }
 
+export interface InventoryAgentRun {
+  summary: string;
+  finishedAt: string | null;
+}
+
+type ToastKind = "success" | "error" | "info" | "warning";
+
 interface InventoryViewProps {
   state: DashboardState;
   agents: Agent[];
+  agentRuns: Record<string, InventoryAgentRun>;
   autoSearchEnabled: boolean;
   onAutoSearchChange: (enabled: boolean) => void;
   onRefresh: () => Promise<void>;
   onAgentTriggered: (agent: Agent, runId: string) => void;
+  onViewActivity: (agent: Agent) => void;
+  onToast: (message: string, kind?: ToastKind) => void;
   runningId: string | null;
 }
 
@@ -36,16 +46,18 @@ function stockStatus(item: InventoryItem) {
 export function InventoryView({
   state,
   agents,
+  agentRuns,
   autoSearchEnabled,
   onAutoSearchChange,
   onRefresh,
   onAgentTriggered,
+  onViewActivity,
+  onToast,
   runningId,
 }: InventoryViewProps) {
   const [drafts, setDrafts] = useState<Record<string, DraftValues>>({});
   const [savingId, setSavingId] = useState<string | null>(null);
   const [toggleLoading, setToggleLoading] = useState(false);
-  const [feedback, setFeedback] = useState<string | null>(null);
 
   useEffect(() => {
     const next: Record<string, DraftValues> = {};
@@ -60,14 +72,16 @@ export function InventoryView({
 
   const handleToggle = async () => {
     setToggleLoading(true);
-    setFeedback(null);
     try {
       const next = !autoSearchEnabled;
       await updateInventorySettings(next);
       onAutoSearchChange(next);
-      setFeedback(next ? "Auto-search enabled — saving low stock will trigger agents." : "Auto-search disabled.");
+      onToast(
+        next ? "Auto-search enabled — low stock will trigger linked agents." : "Auto-search disabled.",
+        next ? "success" : "info"
+      );
     } catch {
-      setFeedback("Failed to update setting.");
+      onToast("Failed to update auto-search setting.", "error");
     } finally {
       setToggleLoading(false);
     }
@@ -78,7 +92,6 @@ export function InventoryView({
     if (!draft) return;
 
     setSavingId(item.id);
-    setFeedback(null);
     try {
       const result = await saveInventoryItem(item.id, {
         currentStock: draft.currentStock,
@@ -86,23 +99,21 @@ export function InventoryView({
       });
       await onRefresh();
 
-      if (result.triggered && result.runId && result.agentId) {
-        const agent = agents.find((a) => a.agentId === result.agentId);
-        if (agent) {
-          setFeedback(result.message ?? `Auto-search started for ${agent.name}`);
-          onAgentTriggered(agent, result.runId);
-        }
+      if (result.triggered && result.runId && result.agent) {
+        onToast(result.message ?? `Auto-restock started for ${result.agent.name}`, "success");
+        onAgentTriggered(result.agent, result.runId);
       } else if (result.lowStock && !autoSearchEnabled) {
-        setFeedback(`${item.product} is below reorder level — enable auto-search to restock automatically.`);
-      } else if (result.lowStock && !item.linkedAgentId) {
-        setFeedback(`${item.product} is low — link an agent on the Dashboard to enable auto-restock.`);
+        onToast(
+          `${item.product} is below reorder level — turn on auto-search to restock automatically.`,
+          "warning"
+        );
       } else if (result.message) {
-        setFeedback(result.message);
+        onToast(result.message, result.lowStock ? "warning" : "info");
       } else {
-        setFeedback(`Saved ${item.product} inventory.`);
+        onToast(`Saved ${item.product} — ${draft.currentStock} ${item.unit} in stock`, "success");
       }
     } catch {
-      setFeedback(`Failed to save ${item.product}.`);
+      onToast(`Failed to save ${item.product}.`, "error");
     } finally {
       setSavingId(null);
     }
@@ -115,9 +126,17 @@ export function InventoryView({
     }));
   };
 
-  const linkedAgentName = (agentId: string | null) => {
-    if (!agentId) return null;
-    return agents.find((a) => a.agentId === agentId)?.name ?? null;
+  const restockAgentForItem = (item: InventoryItem) => {
+    if (item.linkedAgentId) {
+      return agents.find((a) => a.agentId === item.linkedAgentId) ?? null;
+    }
+    const norm = item.product.toLowerCase().replace(/[^a-z0-9]/g, "");
+    return (
+      agents.find((a) => {
+        const pn = a.product.toLowerCase().replace(/[^a-z0-9]/g, "");
+        return pn === norm || pn.includes(norm) || norm.includes(pn);
+      }) ?? null
+    );
   };
 
   return (
@@ -127,7 +146,8 @@ export function InventoryView({
           <div>
             <h2 className="font-semibold">Auto-restock</h2>
             <p className="mt-1 text-sm text-slate-500">
-              When stock drops at or below the reorder level, linked agents search and purchase automatically.
+              When stock is at or below reorder level and auto-search is on, Save instantly starts a buyer agent — no
+              Dashboard setup needed.
             </p>
           </div>
           <button
@@ -147,7 +167,7 @@ export function InventoryView({
             />
           </button>
         </div>
-        <div className="mt-3 flex items-center gap-2 text-sm">
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
           <span
             className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${
               autoSearchEnabled
@@ -157,21 +177,21 @@ export function InventoryView({
           >
             {autoSearchEnabled ? "Auto-search ON" : "Auto-search OFF"}
           </span>
+          {runningId && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Agent running — stock will refresh when complete
+            </span>
+          )}
           {toggleLoading && <Loader2 className="h-4 w-4 animate-spin text-slate-400" />}
         </div>
         {autoSearchEnabled && (
           <p className="mt-3 rounded-xl bg-brand-50 px-3 py-2 text-xs text-brand-800">
-            Demo: lower <strong>bubble wrap</strong> stock to 20 or below, click Save — the linked agent will run
-            automatically.
+            Demo: turn auto-search on, set any product at or below its reorder level, click Save — a restock agent
+            spawns and searches immediately. Watch via <strong>View Activity</strong>.
           </p>
         )}
       </div>
-
-      {feedback && (
-        <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-          {feedback}
-        </div>
-      )}
 
       <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
         <div className="flex items-center gap-2 border-b border-slate-100 px-5 py-4">
@@ -186,7 +206,8 @@ export function InventoryView({
                 <th className="px-5 py-3 font-medium">In stock</th>
                 <th className="px-5 py-3 font-medium">Reorder at</th>
                 <th className="px-5 py-3 font-medium">Status</th>
-                <th className="px-5 py-3 font-medium">Linked agent</th>
+                <th className="px-5 py-3 font-medium">Restock agent</th>
+                <th className="px-5 py-3 font-medium">Latest run</th>
                 <th className="px-5 py-3 font-medium">Actions</th>
               </tr>
             </thead>
@@ -199,12 +220,14 @@ export function InventoryView({
                 const preview = { ...item, ...draft };
                 const status = stockStatus(preview);
                 const StatusIcon = status.icon;
-                const agentName = linkedAgentName(item.linkedAgentId);
+                const agent = restockAgentForItem(item);
                 const isDirty =
                   draft.currentStock !== item.currentStock ||
                   draft.reorderThreshold !== item.reorderThreshold;
                 const isSaving = savingId === item.id;
-                const agentRunning = item.linkedAgentId === runningId;
+                const agentRunning = !!agent && runningId === agent.agentId;
+                const run = agent ? agentRuns[agent.agentId] : undefined;
+                const hasActivity = agentRunning || !!run;
 
                 return (
                   <tr key={item.id} className="border-b border-slate-50">
@@ -247,26 +270,54 @@ export function InventoryView({
                       </span>
                     </td>
                     <td className="px-5 py-4 text-slate-600">
-                      {agentName ? (
-                        agentName
+                      {agent ? (
+                        <span className="font-medium text-slate-700">{agent.name}</span>
+                      ) : autoSearchEnabled ? (
+                        <span className="text-slate-400">Spawns on Save</span>
                       ) : (
-                        <span className="text-slate-400">None</span>
+                        <span className="text-slate-400">—</span>
+                      )}
+                    </td>
+                    <td className="max-w-xs px-5 py-4 text-xs text-slate-500">
+                      {!agent ? (
+                        "—"
+                      ) : agentRunning ? (
+                        <span className="inline-flex items-center gap-1 text-amber-600">
+                          <Loader2 className="h-3 w-3 animate-spin" /> Running…
+                        </span>
+                      ) : run ? (
+                        <span className="line-clamp-2">{run.summary}</span>
+                      ) : (
+                        "—"
                       )}
                     </td>
                     <td className="px-5 py-4">
-                      <button
-                        type="button"
-                        onClick={() => handleSave(item)}
-                        disabled={!isDirty || isSaving || !!runningId}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-brand-200 bg-brand-50 px-3 py-1.5 text-xs font-medium text-brand-700 hover:bg-brand-100 disabled:opacity-40"
-                      >
-                        {isSaving || agentRunning ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Save className="h-3.5 w-3.5" />
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleSave(item)}
+                          disabled={!isDirty || isSaving || agentRunning}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-brand-200 bg-brand-50 px-3 py-1.5 text-xs font-medium text-brand-700 hover:bg-brand-100 disabled:opacity-40"
+                        >
+                          {isSaving ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Save className="h-3.5 w-3.5" />
+                          )}
+                          Save
+                        </button>
+                        {agent && (
+                          <button
+                            type="button"
+                            onClick={() => onViewActivity(agent)}
+                            disabled={!hasActivity}
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                          >
+                            <ListTree className="h-3.5 w-3.5" />
+                            View Activity
+                          </button>
                         )}
-                        Save
-                      </button>
+                      </div>
                     </td>
                   </tr>
                 );

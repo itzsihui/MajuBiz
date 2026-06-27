@@ -4,6 +4,7 @@ import { runAgent } from "../services/agentRunner.js";
 import {
   getInventoryItem,
   getState,
+  resolveRestockAgent,
   updateInventoryItem,
   updateInventorySettings,
 } from "../store.js";
@@ -67,35 +68,31 @@ inventoryRouter.patch("/inventory/:id", async (req, res) => {
 
   const state = getState();
   const isLowStock = updated.currentStock <= updated.reorderThreshold;
-  const shouldTrigger =
-    isLowStock && state.inventorySettings.autoSearchEnabled && updated.linkedAgentId;
+  const autoSearchOn = state.inventorySettings.autoSearchEnabled;
 
-  if (!shouldTrigger) {
+  if (!isLowStock || !autoSearchOn) {
     res.json({
       item: updated,
       triggered: false,
       lowStock: isLowStock,
+      ...(isLowStock && !autoSearchOn
+        ? { message: "Low stock — turn on auto-search to restock automatically." }
+        : {}),
     });
     return;
   }
 
-  const agent = state.agents.find((a) => a.agentId === updated.linkedAgentId);
-  if (!agent) {
-    res.json({
-      item: updated,
-      triggered: false,
-      lowStock: isLowStock,
-      message: "Linked agent not found",
-    });
-    return;
-  }
+  const freshItem = getInventoryItem(id)!;
+  const { agent, autoLinked, created } = resolveRestockAgent(freshItem);
 
   if (agent.status === "running") {
     res.json({
-      item: updated,
+      item: getInventoryItem(id),
       triggered: false,
-      lowStock: isLowStock,
-      message: "Linked agent is already running",
+      lowStock: true,
+      agentId: agent.agentId,
+      agentName: agent.name,
+      message: `${agent.name} is already running`,
     });
     return;
   }
@@ -103,13 +100,24 @@ inventoryRouter.patch("/inventory/:id", async (req, res) => {
   const runId = uuidv4();
   void runAgent(agent, runId);
 
+  const linkedItem = getInventoryItem(id);
+  let message = `Auto-search started for ${agent.name}`;
+  if (created) {
+    message = `Created ${agent.name} and started search`;
+  } else if (autoLinked) {
+    message = `Matched ${agent.name} and started search`;
+  }
+
   res.json({
-    item: updated,
+    item: linkedItem,
     triggered: true,
     lowStock: true,
     runId,
     agentId: agent.agentId,
     agentName: agent.name,
-    message: `Auto-search triggered for ${agent.name}`,
+    agent,
+    autoLinked,
+    agentCreated: created,
+    message,
   });
 });

@@ -51,7 +51,7 @@ export async function runAgent(agent: Agent, runId: string): Promise<void> {
       );
     };
 
-    emitScrapeProgress("Searching Singapore web via Exa…");
+    emitScrapeProgress("Exa — live web search…");
 
     const { scrape, brain } = await scrapePrice(agent, emitScrapeProgress);
 

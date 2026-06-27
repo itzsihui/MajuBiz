@@ -2,7 +2,8 @@ import { Exa } from "exa-js";
 import type { Agent, ScrapeResult } from "../types.js";
 import { decidePurchase, type BrainDecision, type ListingOption } from "./agentBrain.js";
 import { listingRelevanceScore, isLikelyWrongSubtype, matchesProductKeywords } from "./listingRelevance.js";
-import { marketplaceSearchUrl, searchMarketplaceDirect } from "./marketplaceSearch.js";
+import { marketplaceSearchUrl } from "./marketplaceSearch.js";
+import { searchSellerAgentFallback } from "./sellerAgentFallback.js";
 
 export type { BrainDecision };
 
@@ -140,9 +141,10 @@ function collectListingCandidates(
 
 function parsePackFromTitle(title: string): number | null {
   for (const p of [
+    /=\s*(\d+)\s*pcs?\b/i,
     /(\d+)\s*rolls?\b/i,
-    /\((\d+)\s*(?:pcs|pc|pieces|rolls|units|pkts|pkt|pack)\)/i,
-    /(\d+)\s*(?:pcs|pc|pieces|rolls|units|pkts|pkt|pack)\s*(?:\/|per|\b)/i,
+    /\((\d+)\s*(?:pcs|pc|pieces|rolls|units|pkts|pkt|pack|boxes)\)/i,
+    /(\d+)\s*(?:pcs|pc|pieces|rolls|units|pkts|pkt|pack|boxes)\s*(?:\/|per|\b)/i,
   ]) {
     const m = title.match(p);
     if (m) return parseInt(m[1], 10);
@@ -152,27 +154,78 @@ function parsePackFromTitle(title: string): number | null {
 
 function parsePricesFromText(text: string): number[] {
   const prices: number[] = [];
+  const lower = text.toLowerCase();
   for (const m of text.matchAll(/(?:^|[^\d])S\$?\s*(\d+(?:\.\d{1,2})?)\b/gi)) {
+    const idx = m.index ?? 0;
+    const before = lower.slice(Math.max(0, idx - 24), idx);
+    if (/\b(save|off|discount|qty|quantity|min\.?\s*order|per\s*)\s*$/i.test(before)) continue;
     const n = parseFloat(m[1]);
-    if (n >= 0.5 && n < 500) prices.push(n);
+    if (n >= 0.5 && n <= MAX_LISTING_PRICE_SGD) prices.push(n);
   }
   return prices;
 }
 
-/** Avoid grabbing promo noise like "Save S$1" — prefer median cluster */
+/** Prefer median listing price — avoids "Save S$5" / qty numbers picked as the main price */
 function pickListingPrice(prices: number[]): number | null {
   if (!prices.length) return null;
   const sorted = [...new Set(prices)].sort((a, b) => a - b);
   if (sorted.length === 1) return sorted[0];
 
-  const min = sorted[0];
-  const max = sorted[sorted.length - 1];
-  if (max > min * 2.5) {
-    const mid = sorted[Math.floor(sorted.length / 2)];
-    const cluster = sorted.filter((p) => p >= mid * 0.65);
-    return cluster[0] ?? mid;
-  }
-  return sorted[0];
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const filtered = sorted.filter((p) => p >= median * 0.55);
+  const pool = filtered.length ? filtered : sorted;
+  return pool[Math.floor(pool.length / 2)];
+}
+
+function resolveListingPrice(summaryPrice: number | null, pageText: string): number | null {
+  const fromText = pickListingPrice(parsePricesFromText(pageText));
+  if (summaryPrice === null) return fromText;
+  if (fromText === null) return summaryPrice;
+  if (summaryPrice < fromText * 0.65) return fromText;
+  if (fromText > summaryPrice * 1.4) return fromText;
+  return summaryPrice;
+}
+
+const MAX_LISTING_PRICE_SGD = 250;
+
+function sanitizeTextForPriceParsing(text: string, url: string): string {
+  let clean = text;
+  try {
+    const u = new URL(url);
+    clean += ` ${u.pathname}`;
+  } catch { /* ignore */ }
+  return clean
+    .replace(/-i\.\d+\.\d+/gi, " ")
+    .replace(/\/products\/[^?\s]+/gi, " ")
+    .replace(/\bi\d{7,}\b/gi, " ")
+    .replace(/\b\d{8,}\b/g, " ")
+    .replace(/\b\d{5,}\.\d+\b/g, " ");
+}
+
+function maxPlausiblePackPrice(agent: Agent): number {
+  return Math.max(agent.trigger.threshold * 1.5, 25);
+}
+
+function isPricePlausible(agent: Agent, listingPrice: number, packQuantity: number): boolean {
+  if (listingPrice < 0.5 || listingPrice > MAX_LISTING_PRICE_SGD) return false;
+  if (listingPrice > maxPlausiblePackPrice(agent)) return false;
+
+  const packsNeeded = Math.max(1, Math.ceil(agent.quantity / Math.max(1, packQuantity)));
+  const orderTotal = packsNeeded * listingPrice;
+  if (orderTotal > agent.trigger.threshold * 2.5) return false;
+
+  const perUnit = listingPrice / Math.max(1, packQuantity);
+  const p = agent.product.toLowerCase();
+  if (p.includes("box") || p.includes("carton")) return perUnit >= 0.35 && perUnit <= 8;
+  if (p.includes("wrap") || p.includes("tape")) return perUnit >= 0.02 && perUnit <= 3;
+  if (p.includes("cake")) return listingPrice >= 15 && listingPrice <= 120;
+  return true;
+}
+
+function clampSummaryPrice(raw: number, agent: Agent): number | null {
+  if (!Number.isFinite(raw) || raw < 0.5 || raw > MAX_LISTING_PRICE_SGD) return null;
+  if (raw > maxPlausiblePackPrice(agent)) return null;
+  return raw;
 }
 
 function computeOrderTotal(agent: Agent, listingPrice: number, packQuantity: number) {
@@ -202,7 +255,7 @@ async function extractFromListing(
     const detail = await exa.getContents([url], {
       highlights: { query: "price SGD listing price", maxCharacters: 1200 },
       summary: {
-        query: `What is the main listing price in SGD for buying: ${title}? Ignore shipping vouchers or "save $X" promos. Include pack size if shown.`,
+        query: `What is the current main selling price in SGD for this product listing: ${title}? Return the price for ONE pack/SKU as shown on the page (e.g. "10 pcs" pack price). Do NOT use quantity counts, "save $X" promos, shipping, or per-piece math — only the headline listing price in SGD.`,
         schema: {
           type: "object",
           properties: {
@@ -223,6 +276,7 @@ async function extractFromListing(
     let listingPrice: number | null = null;
     let packQuantity = defaultPackQty;
     let supplier = title;
+    let summaryPrice: number | null = null;
     if (page?.summary) {
       try {
         const p = JSON.parse(page.summary) as {
@@ -230,19 +284,20 @@ async function extractFromListing(
           packQuantity?: number;
           productName?: string;
         };
-        if (p.listingPriceSgd && p.listingPriceSgd >= 0.5 && p.listingPriceSgd < 500) {
-          listingPrice = p.listingPriceSgd;
+        if (p.listingPriceSgd) summaryPrice = clampSummaryPrice(p.listingPriceSgd, agent);
+        if (p.packQuantity && p.packQuantity > 0 && p.packQuantity <= agent.quantity * 2) {
+          packQuantity = Math.round(p.packQuantity);
         }
-        if (p.packQuantity && p.packQuantity > 0) packQuantity = p.packQuantity;
         if (p.productName) supplier = p.productName.slice(0, 80);
       } catch { /* ignore */ }
     }
-    const titleText = page?.title ?? title;
-    if (listingPrice === null) {
-      const prices = parsePricesFromText(`${titleText} ${(page?.highlights ?? []).join(" ")}`);
-      listingPrice = pickListingPrice(prices);
-    }
+    const pageText = sanitizeTextForPriceParsing(
+      `${page?.title ?? title} ${(page?.highlights ?? []).join(" ")}`,
+      url
+    );
+    listingPrice = resolveListingPrice(summaryPrice, pageText);
     if (listingPrice === null) return null;
+    if (!isPricePlausible(agent, listingPrice, packQuantity)) return null;
     if (isLikelyWrongSubtype(agent, supplier, url)) return null;
 
     return {
@@ -256,7 +311,7 @@ async function extractFromListing(
   } catch {
     const prices = parsePricesFromText(title);
     const listingPrice = pickListingPrice(prices);
-    if (!listingPrice) return null;
+    if (!listingPrice || !isPricePlausible(agent, listingPrice, defaultPackQty)) return null;
     if (isLikelyWrongSubtype(agent, title, url)) return null;
     return {
       listingPrice,
@@ -317,9 +372,10 @@ function hasRelevantSelection(brain: BrainDecision): boolean {
 async function buildOptionsFromCandidates(
   exa: Exa,
   agent: Agent,
-  candidates: Array<{ url: string; title: string; listingPrice?: number; packQuantity?: number }>,
+  candidates: Array<{ url: string; title: string; listingPrice?: number; packQuantity?: number; source?: ScrapeResult["source"]; sellerName?: string; sellerId?: string }>,
   progress: (msg: string) => void,
-  limit = 12
+  limit = 12,
+  label = "Exa"
 ) {
   const options: ListingOption[] = [];
   const extractedMap = new Map<
@@ -333,33 +389,27 @@ async function buildOptionsFromCandidates(
     }
   >();
 
-  progress(`Fetching prices from top ${Math.min(limit, candidates.length)} listing(s)…`);
+  let skipped = 0;
 
-  for (const { url, title, listingPrice, packQuantity, source, sellerName, sellerId } of candidates.slice(0, limit) as Array<{
-    url: string;
-    title: string;
-    listingPrice?: number;
-    packQuantity?: number;
-    source?: ScrapeResult["source"];
-    sellerName?: string;
-    sellerId?: string;
-  }>) {
-    if (source === "seller-agent" && listingPrice) {
-      progress(`  ✓ ${sellerName ?? "Seller Agent"}: S$${listingPrice.toFixed(2)} — ${title.slice(0, 45)}`);
-    } else if (source === "shopee-open" && listingPrice) {
-      progress(`  ✓ Shopee Open Platform: S$${listingPrice.toFixed(2)} — ${title.slice(0, 45)}`);
-    } else {
-      progress(`  Reading ${new URL(url).hostname}${new URL(url).pathname.slice(0, 40)}…`);
-    }
+  for (const { url, title, listingPrice, packQuantity, source, sellerName, sellerId } of candidates.slice(0, limit)) {
+    const isSeller = source === "seller-agent";
     const extracted = await extractFromListing(exa, url, title, agent, { listingPrice, packQuantity });
     if (!extracted) {
-      progress(`    ✗ Could not extract price`);
+      if (!isSeller) skipped++;
       continue;
     }
-    if (source !== "seller-agent" && source !== "shopee-open") {
-      progress(`    ✓ S$${extracted.listingPrice.toFixed(2)} — ${extracted.supplier.slice(0, 45)}`);
-    }
+
     const { total, packsNeeded, priceDetail } = computeOrderTotal(agent, extracted.listingPrice, extracted.packQuantity);
+    if (total > agent.trigger.threshold * 2.5) {
+      if (!isSeller) skipped++;
+      continue;
+    }
+    if (isSeller) {
+      progress(`  ✓ Seller Agent: S$${total.toFixed(2)} — ${title.slice(0, 45)}`);
+    } else {
+      progress(`  ✓ Live via Exa: S$${total.toFixed(2)} — ${extracted.supplier.slice(0, 45)}`);
+    }
+
     const idx = options.length;
     options.push({
       index: idx,
@@ -374,13 +424,39 @@ async function buildOptionsFromCandidates(
     extractedMap.set(idx, {
       highlights: extracted.highlights,
       imageUrl: extracted.imageUrl,
-      source: source ?? "exa",
+      source: isSeller ? "seller-agent" : source ?? "exa",
       sellerName,
       sellerAgentId: sellerId,
     });
   }
 
+  if (skipped > 0 && label === "Exa") {
+    progress(`  (${skipped} listing(s) skipped — no price on page)`);
+  }
+
   return { options, extractedMap };
+}
+
+async function mergeSellerAgentOptions(
+  exa: Exa,
+  agent: Agent,
+  options: ListingOption[],
+  extractedMap: Map<number, { highlights?: string[]; imageUrl?: string; source?: ScrapeResult["source"]; sellerName?: string; sellerAgentId?: string }>,
+  progress: (msg: string) => void,
+  exaPriceFloor: number
+) {
+  const sellerHits = searchSellerAgentFallback(agent, progress, { exaPriceFloor, quiet: true });
+  progress(`Seller Agent — comparing structured quotes alongside Exa…`);
+  const seen = new Set(options.map((o) => o.url));
+  const fresh = sellerHits.filter((h) => !seen.has(h.url));
+  if (!fresh.length) return;
+
+  const extra = await buildOptionsFromCandidates(exa, agent, fresh, progress, 6, "Seller Agent");
+  for (const o of extra.options) {
+    const newIdx = options.length;
+    extractedMap.set(newIdx, extra.extractedMap.get(o.index)!);
+    options.push({ ...o, index: newIdx });
+  }
 }
 
 export async function scrapePrice(agent: Agent, onProgress?: ScrapeProgressFn): Promise<ScrapeRunResult> {
@@ -399,10 +475,7 @@ export async function scrapePrice(agent: Agent, onProgress?: ScrapeProgressFn): 
     const exa = new Exa(apiKey);
     const queries = buildSearchQueries(agent);
 
-    progress(`Starting Exa search for "${agent.product}"…`);
-    for (const q of queries) {
-      progress(`Query → ${q.domains.join(", ")}: "${q.query}"`);
-    }
+    progress(`Exa — searching "${agent.product}" on Shopee, Carousell, Lazada…`);
 
     const searchBatches = await Promise.all(
       queries.map((q) =>
@@ -415,22 +488,19 @@ export async function scrapePrice(agent: Agent, onProgress?: ScrapeProgressFn): 
       )
     );
 
-    progress(`Exa returned ${searchBatches.reduce((n, s) => n + (s.results?.length ?? 0), 0)} raw hits across ${queries.length} queries`);
-
+    const rawHits = searchBatches.reduce((n, s) => n + (s.results?.length ?? 0), 0);
     let candidates = collectListingCandidates(
       searchBatches.flatMap((s) => s.results ?? []),
       agent
     );
 
-    progress(`Found ${candidates.length} product listing URL(s) after filtering`);
+    progress(`Exa — ${candidates.length} listing(s) found (${rawHits} raw hits)`);
     for (const c of candidates.slice(0, 3)) {
-      progress(`  · [score ${c.score}] ${c.title.slice(0, 55)}…`);
+      progress(`  · ${c.title.slice(0, 55)}…`);
     }
 
-    // Retry: Carousell-only with simplified keywords if nothing scored well
     const topScore = candidates[0]?.score ?? 0;
     if (topScore < 2) {
-      progress(`Low relevance scores — retrying Carousell-only search…`);
       const retry = await exa.search(`${agent.product} site:carousell.sg`, {
         type: "auto",
         numResults: 15,
@@ -440,82 +510,39 @@ export async function scrapePrice(agent: Agent, onProgress?: ScrapeProgressFn): 
         [...searchBatches.flatMap((s) => s.results ?? []), ...(retry.results ?? [])],
         agent
       );
-      progress(`After retry: ${candidates.length} listing URL(s), top score ${candidates[0]?.score ?? 0}`);
-    }
-
-    if (!candidates.length) {
-      progress(`Exa found no listing URLs — switching to direct marketplace search…`);
-    }
-
-    let allCandidates = [...candidates];
-
-    if (!allCandidates.length || (allCandidates[0]?.score ?? 0) < 4) {
-      const direct = await searchMarketplaceDirect(agent, progress);
-      const seen = new Set(allCandidates.map((c) => c.url));
-      for (const d of direct) {
-        if (!seen.has(d.url)) {
-          allCandidates.push({
-            url: d.url,
-            title: d.title,
-            score: d.score,
-            listingPrice: d.listingPrice,
-            packQuantity: d.packQuantity,
-            source: d.source,
-            sellerName: d.sellerName,
-            sellerId: d.sellerId,
-          } as (typeof allCandidates[0] & {
-            listingPrice?: number;
-            packQuantity?: number;
-            source?: ScrapeResult["source"];
-            sellerName?: string;
-            sellerId?: string;
-          }));
-          seen.add(d.url);
-        }
+      if (candidates.length) {
+        progress(`Exa — ${candidates.length} listing(s) after Carousell retry`);
       }
-      allCandidates.sort((a, b) => b.score - a.score);
-      progress(`Combined pool: ${allCandidates.length} listing(s)`);
     }
 
-    if (!allCandidates.length) {
-      const brain = emptyBrain(
-        [
-          `Exa and direct search found no listings for "${agent.product}"`,
-          `Try manually: ${marketplaceSearchUrl(agent)}`,
-        ],
-        "No listings found"
-      );
-      return {
-        scrape: { source: "exa", supplier: "—", product: agent.product, price: 0, currency: "SGD", url: marketplaceSearchUrl(agent), matched: false, thoughtProcess: brain.thoughts, relevanceReason: brain.summary },
-        brain,
-      };
-    }
+    const exaOnlyCandidates = [...candidates];
 
-    let { options, extractedMap } = await buildOptionsFromCandidates(
-      exa,
-      agent,
-      allCandidates,
-      progress
-    );
+    let { options, extractedMap } = exaOnlyCandidates.length
+      ? await (async () => {
+          progress(`Exa — reading prices…`);
+          return buildOptionsFromCandidates(exa, agent, exaOnlyCandidates, progress, 8);
+        })()
+      : { options: [] as ListingOption[], extractedMap: new Map() };
 
     if (options.length === 0) {
-      progress(`No prices from Exa pool — retrying with direct marketplace search…`);
-      const direct = await searchMarketplaceDirect(agent, progress);
-      if (direct.length) {
-        ({ options, extractedMap } = await buildOptionsFromCandidates(exa, agent, direct, progress));
+      if (!exaOnlyCandidates.length) {
+        progress(`Exa — no listings found, trying Seller Agent…`);
+      } else {
+        progress(`Exa — could not read prices, trying Seller Agent…`);
+      }
+      const sellerHits = searchSellerAgentFallback(agent, progress);
+      if (sellerHits.length) {
+        ({ options, extractedMap } = await buildOptionsFromCandidates(exa, agent, sellerHits, progress, 6, "Seller Agent"));
+      }
+    } else {
+      const minExaTotal = Math.min(...options.map((o) => o.totalPrice));
+      if (minExaTotal <= agent.trigger.threshold * 2) {
+        await mergeSellerAgentOptions(exa, agent, options, extractedMap, progress, minExaTotal);
       }
     }
 
     if (options.length === 0) {
-      progress(`No prices extracted — listings may be unindexed or missing SGD on page`);
-      const brain = emptyBrain(
-        [
-          `Found ${allCandidates.length} listing URL(s) but could not read prices`,
-          `Manual Shopee search: ${marketplaceSearchUrl(agent)}`,
-          ...allCandidates.slice(0, 4).map((c) => `  · ${c.title.slice(0, 50)} — ${c.url}`),
-        ],
-        "Could not read listing prices"
-      );
+      const brain = emptyBrain([`Could not price listings for "${agent.product}"`], "Could not read listing prices");
       return {
         scrape: {
           source: "exa",
@@ -523,7 +550,7 @@ export async function scrapePrice(agent: Agent, onProgress?: ScrapeProgressFn): 
           product: agent.product,
           price: 0,
           currency: "SGD",
-          url: allCandidates[0]?.url ?? marketplaceSearchUrl(agent),
+          url: exaOnlyCandidates[0]?.url ?? marketplaceSearchUrl(agent),
           matched: false,
           thoughtProcess: brain.thoughts,
           relevanceReason: brain.summary,
@@ -533,22 +560,22 @@ export async function scrapePrice(agent: Agent, onProgress?: ScrapeProgressFn): 
     }
 
     progress(`Agent Brain reviewing ${options.length} priced listing(s)…`);
-    let brain = await decidePurchase(agent, options, allCandidates.length);
+    let brain = await decidePurchase(agent, options, exaOnlyCandidates.length);
 
     if (!hasRelevantSelection(brain)) {
-      progress(`Exa results not relevant — running direct marketplace search…`);
-      const direct = await searchMarketplaceDirect(agent, progress);
+      progress(`Seller Agent — adding structured quotes…`);
+      const sellerHits = searchSellerAgentFallback(agent, progress);
       const seenUrls = new Set(options.map((o) => o.url));
-      const fresh = direct.filter((d) => !seenUrls.has(d.url));
+      const fresh = sellerHits.filter((d) => !seenUrls.has(d.url));
       if (fresh.length) {
-        const extra = await buildOptionsFromCandidates(exa, agent, fresh, progress, 10);
+        const extra = await buildOptionsFromCandidates(exa, agent, fresh, progress, 6, "Seller Agent");
         for (const o of extra.options) {
           const newIdx = options.length;
           extractedMap.set(newIdx, extra.extractedMap.get(o.index)!);
           options.push({ ...o, index: newIdx });
         }
-        progress(`Agent Brain re-reviewing ${options.length} listing(s) after direct search…`);
-        brain = await decidePurchase(agent, options, allCandidates.length + fresh.length);
+        progress(`Agent Brain re-reviewing ${options.length} listing(s)…`);
+        brain = await decidePurchase(agent, options, exaOnlyCandidates.length + fresh.length);
       }
     }
 
