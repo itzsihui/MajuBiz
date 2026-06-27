@@ -99,6 +99,25 @@ export interface ActivityEvent {
   timestamp: string;
 }
 
+export interface PurchaseProposal {
+  agentId: string;
+  agentName: string;
+  product: string;
+  quantity: number;
+  unit: string;
+  title: string;
+  url: string;
+  totalPrice: number;
+  priceDetail: string;
+  listingPrice: number;
+  brainSummary: string;
+  thoughts: string[];
+  verdictReason?: string;
+  imageUrl?: string;
+  sellerName?: string;
+  source?: string;
+}
+
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
 
 export async function fetchState(): Promise<DashboardState> {
@@ -123,6 +142,16 @@ export async function runAgent(agentId: string): Promise<{ runId: string }> {
   });
   if (!res.ok) throw new Error("Failed to start agent run");
   return res.json();
+}
+
+export async function approveRun(runId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/runs/${runId}/approve`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to approve purchase");
+}
+
+export async function rejectRun(runId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/runs/${runId}/reject`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to reject purchase");
 }
 
 export function subscribeRunEvents(

@@ -10,6 +10,7 @@ import {
 } from "../store.js";
 import { scrapePrice, formatScrapeMessage } from "./exaScrape.js";
 import { buildPayNowSettlement } from "./paynowSettlement.js";
+import { buildProposal, waitForRunApproval } from "./runApproval.js";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -101,6 +102,34 @@ export async function runAgent(agent: Agent, runId: string): Promise<void> {
       updateAgent(agent.agentId, { status: "ready" });
       return;
     }
+
+    const proposal = buildProposal(agent, scrape, brain);
+    emitRunEvent(
+      runId,
+      event(
+        runId,
+        "approval",
+        "Agent found a match — waiting for your approval",
+        "running",
+        { proposal }
+      )
+    );
+
+    const approved = await waitForRunApproval(runId, agent, scrape, brain);
+
+    if (!approved) {
+      emitRunEvent(
+        runId,
+        event(runId, "rejected", "Purchase declined — no payment sent", "done", { proposal, scrape })
+      );
+      updateAgent(agent.agentId, { status: "ready" });
+      return;
+    }
+
+    emitRunEvent(
+      runId,
+      event(runId, "approval", "Approved — proceeding to PayNow", "done", { proposal, approved: true })
+    );
 
     emitRunEvent(
       runId,

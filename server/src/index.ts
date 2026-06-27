@@ -5,6 +5,8 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { agentsRouter } from "./routes/agents.js";
 import { inventoryRouter } from "./routes/inventory.js";
+import { marketplaceRouter } from "./routes/marketplace.js";
+import { shopeeOpenPlatformConfigured } from "./services/shopeeOpenPlatform.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -19,11 +21,15 @@ app.get("/api/health", (_req, res) => {
     ok: true,
     openai: Boolean(process.env.OPENAI_API_KEY && !process.env.OPENAI_API_KEY.startsWith("sk-...")),
     exa: Boolean(process.env.EXA_API_KEY && !process.env.EXA_API_KEY.startsWith("exa-...")),
+    brave: Boolean(process.env.BRAVE_SEARCH_API_KEY),
+    shopeeOpen: shopeeOpenPlatformConfigured(),
+    sellerAgents: true,
   });
 });
 
 app.use("/api", agentsRouter);
 app.use("/api", inventoryRouter);
+app.use("/api", marketplaceRouter);
 
 if (isProd) {
   const clientDist = path.join(__dirname, "../../client/dist");

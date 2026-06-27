@@ -11,10 +11,12 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import type { ActivityEvent, Agent, DashboardState, PayNowPayload } from "./lib/api";
+import type { ActivityEvent, Agent, DashboardState, PayNowPayload, PurchaseProposal } from "./lib/api";
 import {
+  approveRun,
   fetchState,
   parseAgent,
+  rejectRun,
   runAgent as runAgentApi,
   subscribeRunEvents,
 } from "./lib/api";
@@ -26,9 +28,55 @@ function formatMoney(amount: number) {
   return `S$${amount.toFixed(2)}`;
 }
 
-function sourceLabel(source: string) {
+function sourceLabel(source: string, sellerName?: string) {
   if (source === "exa") return { text: "Live via Exa", className: "bg-violet-50 text-violet-700" };
+  if (source === "seller-agent") {
+    return {
+      text: sellerName ? `${sellerName}` : "Seller Agent API",
+      className: "bg-emerald-50 text-emerald-700",
+    };
+  }
+  if (source === "shopee-open") return { text: "Shopee Open Platform", className: "bg-orange-50 text-orange-700" };
   return { text: "Demo fallback", className: "bg-amber-50 text-amber-700" };
+}
+
+function isSellerAgentProgressLine(line: string): boolean {
+  return line.includes("Seller Agent") || line.includes("→") || line.startsWith("  ✓ ");
+}
+
+function CommercePipeline({ activeStep }: { activeStep?: "search" | "seller" | "brain" | "pay" }) {
+  const steps = [
+    { id: "search" as const, label: "Exa search", detail: "Live web" },
+    { id: "seller" as const, label: "Seller agent", detail: "JSON quote" },
+    { id: "brain" as const, label: "Agent Brain", detail: "Pick best" },
+    { id: "pay" as const, label: "PayNow", detail: "Settle" },
+  ];
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4">
+      <p className="mb-3 text-xs font-medium uppercase tracking-wide text-slate-400">Agent commerce flow</p>
+      <div className="flex flex-wrap items-center gap-2">
+        {steps.map((step, i) => {
+          const isActive = activeStep === step.id;
+          return (
+            <div key={step.id} className="flex items-center gap-2">
+              <div
+                className={`rounded-lg px-2.5 py-1.5 text-xs ${
+                  isActive
+                    ? "bg-brand-50 font-medium text-brand-700 ring-1 ring-brand-200"
+                    : "bg-slate-50 text-slate-600"
+                }`}
+              >
+                <div>{step.label}</div>
+                <div className="text-[10px] opacity-70">{step.detail}</div>
+              </div>
+              {i < steps.length - 1 && <span className="text-slate-300">→</span>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 const STEP_ORDER = [
@@ -38,8 +86,10 @@ const STEP_ORDER = [
   "reasoning",
   "compare",
   "scrape_done",
+  "approval",
   "settle",
   "no_match",
+  "rejected",
   "complete",
   "error",
 ] as const;
@@ -56,7 +106,7 @@ interface AgentRunRecord {
 }
 
 function deriveRunSummary(events: ActivityEvent[]): string {
-  const terminal = events.find((e) => ["complete", "no_match", "error"].includes(e.step));
+  const terminal = events.find((e) => ["complete", "no_match", "rejected", "error"].includes(e.step));
   if (terminal) return terminal.message;
   if (events.some((e) => e.status === "running")) return "Running…";
   return "Run in progress…";
@@ -75,7 +125,7 @@ function mergeActivityEvents(prev: ActivityEvent[], incoming: ActivityEvent): Ac
     }
   }
 
-  if (["complete", "no_match", "error"].includes(incoming.step)) {
+  if (["complete", "no_match", "rejected", "error"].includes(incoming.step)) {
     for (const [step, event] of map) {
       if (event.status === "running") {
         map.set(step, { ...event, status: "done" });
@@ -90,12 +140,14 @@ function stepLabel(step: string): string {
   const labels: Record<string, string> = {
     log: "Initiate",
     start: "Agent run",
-    scrape: "Web search",
+    scrape: "Discovery",
     reasoning: "Agent Brain",
     compare: "Price comparison",
     scrape_done: "Decision",
+    approval: "Your approval",
     settle: "PayNow settlement",
     no_match: "No purchase",
+    rejected: "Declined",
     complete: "Complete",
     error: "Error",
   };
@@ -108,12 +160,20 @@ function ActivityModal({
   activity,
   agentName,
   isRunning,
+  pendingApproval,
+  onApprove,
+  onReject,
+  approvalLoading,
 }: {
   open: boolean;
   onClose: () => void;
   activity: ActivityEvent[];
   agentName: string | null;
   isRunning: boolean;
+  pendingApproval: PurchaseProposal | null;
+  onApprove: () => void;
+  onReject: () => void;
+  approvalLoading: boolean;
 }) {
   if (!open) return null;
 
@@ -162,6 +222,14 @@ function ActivityModal({
                   ev.step === "scrape" && ev.data && typeof ev.data === "object"
                     ? (ev.data as { progress?: string[] }).progress
                     : null;
+                const approvalData =
+                  ev.step === "approval" && ev.data && typeof ev.data === "object"
+                    ? (ev.data as { proposal?: PurchaseProposal; approved?: boolean })
+                    : null;
+                const showApprovalCard =
+                  ev.step === "approval" &&
+                  ev.status === "running" &&
+                  (approvalData?.proposal ?? pendingApproval);
 
                 return (
                   <li key={`${ev.step}-${ev.timestamp}`} className="flex gap-3">
@@ -180,13 +248,32 @@ function ActivityModal({
                         Step {i + 1} · {stepLabel(ev.step)}
                       </p>
 
-                      {ev.step === "scrape" && scrapeProgress?.length ? (
+                      {showApprovalCard ? (
+                        <ApprovalCard
+                          proposal={approvalData?.proposal ?? pendingApproval!}
+                          onApprove={onApprove}
+                          onReject={onReject}
+                          loading={approvalLoading}
+                        />
+                      ) : ev.step === "scrape" && scrapeProgress?.length ? (
                         <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto rounded-xl bg-sky-50 p-3 font-mono text-[11px] leading-relaxed text-sky-900">
-                          {scrapeProgress.map((line, j) => (
-                            <li key={j} className={j === scrapeProgress.length - 1 && isActive ? "font-medium" : ""}>
-                              {line}
-                            </li>
-                          ))}
+                          {scrapeProgress.map((line, j) => {
+                            const sellerLine = isSellerAgentProgressLine(line);
+                            return (
+                              <li
+                                key={j}
+                                className={
+                                  j === scrapeProgress.length - 1 && isActive
+                                    ? "font-medium"
+                                    : sellerLine
+                                      ? "text-emerald-800"
+                                      : ""
+                                }
+                              >
+                                {line}
+                              </li>
+                            );
+                          })}
                         </ul>
                       ) : ev.step === "reasoning" && reasoningData?.thoughts ? (
                         <ul className="mt-2 space-y-1.5 rounded-xl bg-violet-50 p-3 text-xs text-violet-900">
@@ -340,6 +427,80 @@ function NewAgentModal({
   );
 }
 
+function ApprovalCard({
+  proposal,
+  onApprove,
+  onReject,
+  loading,
+}: {
+  proposal: PurchaseProposal;
+  onApprove: () => void;
+  onReject: () => void;
+  loading: boolean;
+}) {
+  return (
+    <div className="mt-3 overflow-hidden rounded-2xl border border-amber-200 bg-amber-50/80">
+      <div className="border-b border-amber-100 px-4 py-3">
+        <p className="text-sm font-semibold text-amber-900">Can I buy this?</p>
+        <p className="mt-1 text-xs text-amber-700">
+          Agent Brain picked the cheapest relevant listing under your budget — confirm before PayNow.
+        </p>
+        {proposal.sellerName && (
+          <p className="mt-2 inline-flex rounded-full bg-emerald-100 px-2.5 py-0.5 text-[11px] font-medium text-emerald-800">
+            via {proposal.sellerName}
+          </p>
+        )}
+      </div>
+      <div className="flex gap-4 p-4">
+        <div className="flex h-24 w-24 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-white ring-1 ring-amber-100">
+          {proposal.imageUrl ? (
+            <img src={proposal.imageUrl} alt="" className="h-full w-full object-cover" />
+          ) : (
+            <Package className="h-10 w-10 text-amber-300" />
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="font-medium text-slate-900">{proposal.title}</p>
+          <p className="mt-1 text-lg font-semibold text-brand-700">{formatMoney(proposal.totalPrice)}</p>
+          <p className="text-xs text-slate-500">{proposal.priceDetail}</p>
+          <p className="mt-2 text-xs text-slate-600">
+            For {proposal.quantity} {proposal.unit} of &ldquo;{proposal.product}&rdquo;
+          </p>
+          {proposal.verdictReason && (
+            <p className="mt-1 text-xs text-violet-700">Why: {proposal.verdictReason}</p>
+          )}
+          <a
+            href={proposal.url}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-2 block truncate text-xs text-brand-600 hover:underline"
+          >
+            View listing ↗
+          </a>
+        </div>
+      </div>
+      <div className="flex gap-2 border-t border-amber-100 bg-white/60 px-4 py-3">
+        <button
+          type="button"
+          onClick={onReject}
+          disabled={loading}
+          className="flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+        >
+          No, skip
+        </button>
+        <button
+          type="button"
+          onClick={onApprove}
+          disabled={loading}
+          className="flex-1 rounded-xl bg-brand-600 px-3 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+        >
+          {loading ? "Confirming…" : "Yes, buy it"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PayNowPanel({ payload }: { payload: PayNowPayload | null }) {
   if (!payload) {
     return (
@@ -378,6 +539,13 @@ export default function App() {
   const [runningId, setRunningId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<AppTab>("dashboard");
   const [autoSearchEnabled, setAutoSearchEnabled] = useState(false);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [pendingApproval, setPendingApproval] = useState<{
+    runId: string;
+    agent: Agent;
+    proposal: PurchaseProposal;
+  } | null>(null);
+  const [approvalLoading, setApprovalLoading] = useState(false);
 
   const refresh = useCallback(async () => {
     const data = await fetchState();
@@ -404,6 +572,7 @@ export default function App() {
   const subscribeToAgentRun = useCallback(
     (agent: Agent, runId: string, initialEvents: ActivityEvent[] = []) => {
       setRunningId(agent.agentId);
+      setActiveRunId(runId);
       setMonitorStatus("Running");
       setActivity(initialEvents);
       setActivityAgentName(agent.name);
@@ -420,7 +589,7 @@ export default function App() {
       subscribeRunEvents(agent.agentId, runId, (ev) => {
         setActivity((prev) => {
           const next = mergeActivityEvents(prev, ev);
-          const finished = ["complete", "no_match", "error"].includes(ev.step);
+          const finished = ["complete", "no_match", "rejected", "error"].includes(ev.step);
           setAgentRuns((r) => ({
             ...r,
             [agent.agentId]: {
@@ -431,13 +600,21 @@ export default function App() {
           }));
           return next;
         });
+        if (ev.step === "approval" && ev.status === "running" && ev.data && typeof ev.data === "object") {
+          const data = ev.data as { proposal?: PurchaseProposal };
+          if (data.proposal) {
+            setPendingApproval({ runId, agent, proposal: data.proposal });
+          }
+        }
         if (ev.step === "complete" && ev.data && typeof ev.data === "object") {
           const data = ev.data as { paynow?: PayNowPayload };
           if (data.paynow) setLastPayNow(data.paynow);
         }
-        if (ev.step === "complete" || ev.step === "no_match" || ev.step === "error") {
+        if (ev.step === "complete" || ev.step === "no_match" || ev.step === "rejected" || ev.step === "error") {
           setMonitorStatus("Ready");
           setRunningId(null);
+          setActiveRunId(null);
+          setPendingApproval(null);
           refresh();
         }
       });
@@ -504,6 +681,38 @@ export default function App() {
     setActivityOpen(true);
   };
 
+  const handleApprove = async () => {
+    if (!activeRunId || approvalLoading) return;
+    setApprovalLoading(true);
+    try {
+      await approveRun(activeRunId);
+    } catch {
+      addLog("Failed to approve purchase", "error");
+    } finally {
+      setApprovalLoading(false);
+    }
+  };
+
+  const handleReject = async () => {
+    if (!activeRunId || approvalLoading) return;
+    setApprovalLoading(true);
+    try {
+      await rejectRun(activeRunId);
+    } catch {
+      addLog("Failed to reject purchase", "error");
+    } finally {
+      setApprovalLoading(false);
+    }
+  };
+
+  const openApprovalFromToast = () => {
+    if (!pendingApproval) return;
+    setViewingAgentId(pendingApproval.agent.agentId);
+    setActivityAgentName(pendingApproval.agent.name);
+    setActivity(pendingApproval.agent.agentId === runningId ? activity : agentRuns[pendingApproval.agent.agentId]?.activity ?? activity);
+    setActivityOpen(true);
+  };
+
   const activeAgents = state?.agents.filter((a) => a.status === "ready" || a.status === "running").length ?? 0;
 
   return (
@@ -549,7 +758,10 @@ export default function App() {
             Network: Singapore
           </div>
           <div>Active agents: {activeAgents}</div>
-          <div className="text-slate-400">Powered by Exa + OpenAI</div>
+          <div className="space-y-1 border-t border-slate-200 pt-2">
+            <div className="font-medium text-slate-500">Stack</div>
+            <div>Exa → Seller Agent → PayNow</div>
+          </div>
         </div>
       </aside>
 
@@ -590,8 +802,8 @@ export default function App() {
         {activeTab === "dashboard" ? (
         <main className="flex-1 space-y-6 p-6">
           {/* KPIs */}
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:col-span-2 lg:col-span-1">
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-sm text-slate-500">Total Balance</p>
@@ -613,6 +825,22 @@ export default function App() {
                 <Bot className="h-8 w-8 text-brand-500 opacity-80" />
               </div>
             </div>
+            <CommercePipeline
+              activeStep={
+                runningId
+                  ? activity.some((e) => e.step === "settle" || e.step === "complete")
+                    ? "pay"
+                    : activity.some((e) => e.step === "reasoning" || e.step === "compare")
+                      ? "brain"
+                      : activity.some((e) =>
+                            e.step === "scrape" &&
+                            (e.data as { progress?: string[] })?.progress?.some(isSellerAgentProgressLine)
+                          )
+                        ? "seller"
+                        : "search"
+                  : undefined
+              }
+            />
           </div>
 
           {/* Agents table — full width */}
@@ -703,7 +931,7 @@ export default function App() {
                   <p className="p-5 text-sm text-slate-400">No transactions yet.</p>
                 ) : (
                   state?.transactions.map((tx) => {
-                    const badge = sourceLabel(tx.source);
+                    const badge = sourceLabel(tx.source, tx.paynowPayload?.creditor?.name);
                     const supplier = tx.paynowPayload?.creditor?.name;
                     return (
                     <div key={tx.id} className="flex items-start justify-between gap-4 px-5 py-4">
@@ -781,7 +1009,29 @@ export default function App() {
         }
         agentName={activityAgentName}
         isRunning={!!runningId && viewingAgentId === runningId}
+        pendingApproval={
+          pendingApproval && viewingAgentId === pendingApproval.agent.agentId ? pendingApproval.proposal : null
+        }
+        onApprove={handleApprove}
+        onReject={handleReject}
+        approvalLoading={approvalLoading}
       />
+
+      {pendingApproval && (
+        <button
+          type="button"
+          onClick={openApprovalFromToast}
+          className="fixed bottom-6 right-6 z-40 max-w-sm rounded-2xl border border-amber-200 bg-white p-4 text-left shadow-xl ring-1 ring-amber-100 hover:ring-amber-300"
+        >
+          <p className="text-xs font-medium uppercase tracking-wide text-amber-600">Approval needed</p>
+          <p className="mt-1 font-semibold text-slate-900">Can I buy this for {formatMoney(pendingApproval.proposal.totalPrice)}?</p>
+          {pendingApproval.proposal.sellerName && (
+            <p className="mt-1 text-xs text-emerald-700">from {pendingApproval.proposal.sellerName}</p>
+          )}
+          <p className="mt-1 line-clamp-2 text-sm text-slate-600">{pendingApproval.proposal.title}</p>
+          <p className="mt-2 text-xs font-medium text-brand-600">Tap to review →</p>
+        </button>
+      )}
     </div>
   );
 }

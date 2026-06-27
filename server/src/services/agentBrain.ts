@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import type { Agent } from "../types.js";
-
+import { extractIntentModifiers, isLikelyWrongSubtype } from "./productMatch.js";
 export interface ListingOption {
   index: number;
   title: string;
@@ -37,15 +37,21 @@ function fallbackBrain(agent: Agent, options: ListingOption[]): BrainDecision {
     .split(/\s+/)
     .filter((w) => w.length > 3);
 
+  const modifiers = extractIntentModifiers(agent);
   const verdicts: ListingVerdict[] = options.map((o) => {
     const blob = `${o.title} ${o.url}`.toLowerCase();
     const normBlob = blob.replace(/[^a-z0-9]/g, "");
     const hits = productWords.filter((w) => blob.includes(w) || normBlob.includes(w.replace(/[^a-z0-9]/g, "")));
+    const wrongSubtype = isLikelyWrongSubtype(agent, o.title, o.url);
     const shinMatch =
       normBlob.includes("shinchan") &&
       (agent.product + (agent.prompt ?? "")).toLowerCase().replace(/[^a-z0-9]/g, "").includes("shin");
+    const velcroListing = /velcro|hook.?loop|fastener/i.test(blob);
+    const genericTapeRequest = /\btape\b/i.test(agent.product) && modifiers.length === 0;
     const relevant =
-      shinMatch || (productWords.length === 0 ? true : hits.length >= Math.ceil(productWords.length * 0.5));
+      !wrongSubtype &&
+      ! (genericTapeRequest && velcroListing) &&
+      (shinMatch || (productWords.length === 0 ? true : hits.length >= Math.ceil(productWords.length * 0.5)));
     thoughts.push(
       relevant
         ? `✓ "${o.title.slice(0, 50)}…" — matches (${hits.join(", ") || "generic"}) · ${o.priceDetail}`
@@ -54,7 +60,7 @@ function fallbackBrain(agent: Agent, options: ListingOption[]): BrainDecision {
     return {
       index: o.index,
       relevant,
-      reason: relevant ? `Matches ${hits.join(", ") || "product"}` : "Product name mismatch",
+      reason: relevant ? `Matches ${hits.join(", ") || "product"}` : wrongSubtype ? "Wrong product subtype" : "Product name mismatch",
     };
   });
 
@@ -121,6 +127,12 @@ export async function decidePurchase(
     return fallbackBrain(agent, options);
   }
 
+  const modifiers = extractIntentModifiers(agent);
+  const intentNote =
+    modifiers.length > 0
+      ? `Specific intent: ${modifiers.join(", ")}`
+      : `Generic request — prefer the most typical match for "${agent.product}"`;
+
   const listingBlock = options
     .map(
       (o) =>
@@ -140,6 +152,8 @@ Think step-by-step out loud, then decide which listing (if any) to buy.
 
 Rules:
 - Be STRICT on category mismatches (phone vs cake, Mac mini vs MacBook).
+- Be STRICT on product subtypes: clear/OPP/packing tape ≠ velcro hook-and-loop fasteners; duct tape ≠ masking tape.
+- For generic "tape" restock requests, prefer packing tape / OPP clear tape — reject velcro fasteners unless explicitly requested.
 - But be SMART on naming: URL slugs and titles may use hyphens or spacing — "shin-chan" / "shin chan" / "shinchan" are the SAME character for cake requests.
 - Customised cake listings on Carousell often include the character/theme in the URL path — trust the URL slug if it matches the request.
 - Only select listings that truly match what the owner asked to buy.
@@ -150,16 +164,19 @@ Rules:
         },
         {
           role: "user",
-          content: `Owner's original request context:
-Product: "${agent.product}"
+          content: `Owner's original request:
+"${agent.prompt}"
+
+Parsed product: "${agent.product}"
 Quantity: ${agent.quantity} ${agent.unit}
 Max budget (total): S$${agent.trigger.threshold.toFixed(2)}
+${intentNote}
 
 Listings found by Exa web search (${listingCount} URLs ranked, showing ${options.length}):
 ${listingBlock}
 
-Each listing includes URL — read the URL slug for product hints (e.g. carousell.sg/p/shin-chan-character-cakes...).
-Analyze each listing, reject mismatches, compare prices of valid ones, pick cheapest if under budget.`,
+Each listing includes URL — read the URL slug for product hints.
+Analyze each listing, reject mismatches (especially wrong subtypes), compare prices of valid ones, pick cheapest if under budget.`,
         },
       ],
       response_format: {

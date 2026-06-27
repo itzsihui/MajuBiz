@@ -18,7 +18,7 @@ export interface Agent {
 }
 
 export interface ScrapeResult {
-  source: "exa" | "exa-cached" | "fallback";
+  source: "exa" | "exa-cached" | "fallback" | "seller-agent" | "shopee-open";
   supplier: string;
   product: string;
   /** Total estimated cost for agent.quantity */
@@ -42,6 +42,9 @@ export interface ScrapeResult {
     url: string;
     selected: boolean;
   }>;
+  imageUrl?: string;
+  sellerName?: string;
+  sellerAgentId?: string;
 }
 
 export interface PayNowPayload {

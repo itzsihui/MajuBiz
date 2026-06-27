@@ -1,4 +1,5 @@
 import type { Agent, PayNowPayload, ScrapeResult } from "../types.js";
+import { getOrCreateSellerAgent } from "./dynamicSellerAgent.js";
 
 function randomRef(): string {
   return `PN2-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
@@ -6,6 +7,9 @@ function randomRef(): string {
 
 export function buildPayNowSettlement(agent: Agent, scrape: ScrapeResult): PayNowPayload {
   const unitPrice = Math.round((scrape.price / agent.quantity) * 100) / 100;
+  const sellerAgent = scrape.source === "seller-agent" ? getOrCreateSellerAgent(agent) : undefined;
+  const creditorName = scrape.sellerName ?? scrape.supplier;
+  const creditorUen = sellerAgent?.uen ?? "201234567A";
 
   return {
     scheme: "PayNow-Gen2",
@@ -13,8 +17,8 @@ export function buildPayNowSettlement(agent: Agent, scrape: ScrapeResult): PayNo
     transactionRef: randomRef(),
     amount: { value: scrape.price, currency: "SGD" },
     creditor: {
-      name: scrape.supplier,
-      uen: "201234567A",
+      name: creditorName,
+      uen: creditorUen,
       proxyType: "UEN",
     },
     structuredRemittance: {

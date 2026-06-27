@@ -8,6 +8,7 @@ import {
 } from "../store.js";
 import { parseAgentPrompt } from "../services/parseAgent.js";
 import { runAgent } from "../services/agentRunner.js";
+import { resolveRunApproval } from "../services/runApproval.js";
 import type { Agent } from "../types.js";
 
 export const agentsRouter = Router();
@@ -83,7 +84,7 @@ agentsRouter.get("/agents/:id/events", (req, res) => {
 
   const unsubscribe = subscribeRun(runId, (ev) => {
     res.write(`data: ${JSON.stringify(ev)}\n\n`);
-    if (ev.step === "complete" || ev.step === "no_match" || ev.step === "error") {
+    if (ev.step === "complete" || ev.step === "no_match" || ev.step === "error" || ev.step === "rejected") {
       res.write(`data: ${JSON.stringify({ ...ev, step: "stream_end" })}\n\n`);
       unsubscribe();
       res.end();
@@ -91,4 +92,22 @@ agentsRouter.get("/agents/:id/events", (req, res) => {
   });
 
   req.on("close", () => unsubscribe());
+});
+
+agentsRouter.post("/runs/:runId/approve", (req, res) => {
+  const ok = resolveRunApproval(req.params.runId, true);
+  if (!ok) {
+    res.status(404).json({ error: "No pending approval for this run" });
+    return;
+  }
+  res.json({ ok: true, approved: true });
+});
+
+agentsRouter.post("/runs/:runId/reject", (req, res) => {
+  const ok = resolveRunApproval(req.params.runId, false);
+  if (!ok) {
+    res.status(404).json({ error: "No pending approval for this run" });
+    return;
+  }
+  res.json({ ok: true, approved: false });
 });
