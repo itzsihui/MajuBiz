@@ -21,11 +21,27 @@ export interface ScrapeResult {
   source: "exa" | "exa-cached" | "fallback";
   supplier: string;
   product: string;
+  /** Total estimated cost for agent.quantity */
   price: number;
   currency: "SGD";
   url: string;
   matched: boolean;
+  relevant?: boolean;
+  relevanceReason?: string;
+  listingPrice?: number;
+  packQuantity?: number;
+  packsNeeded?: number;
+  priceDetail?: string;
   highlights?: string[];
+  isCheapestPick?: boolean;
+  thoughtProcess?: string[];
+  priceComparisons?: Array<{
+    title: string;
+    total: number;
+    relevant: boolean;
+    url: string;
+    selected: boolean;
+  }>;
 }
 
 export interface PayNowPayload {
@@ -86,9 +102,24 @@ export interface ParsedAgentConfig {
   trigger: AgentTrigger;
 }
 
+export interface InventoryItem {
+  id: string;
+  product: string;
+  unit: string;
+  currentStock: number;
+  reorderThreshold: number;
+  linkedAgentId: string | null;
+}
+
+export interface InventorySettings {
+  autoSearchEnabled: boolean;
+}
+
 export interface DashboardState {
   balance: number;
   currency: "SGD";
   agents: Agent[];
   transactions: Transaction[];
+  inventory: InventoryItem[];
+  inventorySettings: InventorySettings;
 }

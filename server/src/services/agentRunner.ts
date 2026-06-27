@@ -5,9 +5,10 @@ import {
   deductBalance,
   emitRunEvent,
   clearRun,
+  restockByAgent,
   updateAgent,
 } from "../store.js";
-import { scrapePrice } from "./exaScrape.js";
+import { scrapePrice, formatScrapeMessage } from "./exaScrape.js";
 import { buildPayNowSettlement } from "./paynowSettlement.js";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -29,55 +30,74 @@ function event(
   };
 }
 
+function formatMoney(n: number) {
+  return `S$${n.toFixed(2)}`;
+}
+
 export async function runAgent(agent: Agent, runId: string): Promise<void> {
   updateAgent(agent.agentId, { status: "running" });
 
   try {
-    emitRunEvent(
-      runId,
-      event(runId, "start", "Agent run started", "running")
-    );
+    emitRunEvent(runId, event(runId, "start", "Agent run started", "running"));
     await delay(400);
 
+    const scrapeProgress: string[] = [];
+    const emitScrapeProgress = (line: string) => {
+      scrapeProgress.push(line);
+      emitRunEvent(
+        runId,
+        event(runId, "scrape", line, "running", { progress: [...scrapeProgress] })
+      );
+    };
+
+    emitScrapeProgress("Searching Singapore web via Exa…");
+
+    const { scrape, brain } = await scrapePrice(agent, emitScrapeProgress);
+
     emitRunEvent(
       runId,
-      event(runId, "scrape", "Searching Singapore web via Exa...", "running")
+      event(runId, "scrape", scrapeProgress.at(-1) ?? "Search complete", "done", {
+        progress: scrapeProgress,
+      })
     );
 
-    const scrape = await scrapePrice(agent);
+    emitRunEvent(
+      runId,
+      event(runId, "reasoning", "Agent Brain — thinking through options…", "done", {
+        thoughts: brain.thoughts,
+      })
+    );
+
+    const compareLines =
+      scrape.priceComparisons
+        ?.filter((c) => c.relevant)
+        .sort((a, b) => a.total - b.total)
+        .map(
+          (c, i) =>
+            `${i === 0 && c.selected ? "★ " : "  "}${formatMoney(c.total)} — ${c.title}${c.selected ? " (selected)" : ""}`
+        ) ?? [];
 
     emitRunEvent(
       runId,
       event(
         runId,
-        "scrape_done",
-        scrape.source === "exa"
-          ? `Exa found S$${scrape.price.toFixed(2)} — ${scrape.supplier}`
-          : `Demo fallback S$${scrape.price.toFixed(2)} — set EXA_API_KEY for live listings`,
+        "compare",
+        compareLines.length
+          ? `Price comparison (${compareLines.length} relevant):\n${compareLines.join("\n")}`
+          : brain.summary,
         "done",
-        scrape
+        { comparisons: scrape.priceComparisons, summary: brain.summary }
       )
     );
 
-    if (scrape.source === "exa" && scrape.url) {
-      emitRunEvent(
-        runId,
-        event(runId, "source_url", scrape.url, "done", { url: scrape.url })
-      );
-    }
-    await delay(500);
+    emitRunEvent(
+      runId,
+      event(runId, "scrape_done", formatScrapeMessage(scrape), "done", scrape)
+    );
+    await delay(400);
 
     if (!scrape.matched) {
-      emitRunEvent(
-        runId,
-        event(
-          runId,
-          "no_match",
-          `Price S$${scrape.price.toFixed(2)} is above threshold S$${agent.trigger.threshold.toFixed(2)} — no purchase`,
-          "done",
-          scrape
-        )
-      );
+      emitRunEvent(runId, event(runId, "no_match", brain.summary, "done", scrape));
       updateAgent(agent.agentId, { status: "ready" });
       return;
     }
@@ -105,13 +125,14 @@ export async function runAgent(agent: Agent, runId: string): Promise<void> {
       createdAt: new Date().toISOString(),
     };
     addTransaction(tx);
+    restockByAgent(agent.agentId, agent.quantity);
 
     emitRunEvent(
       runId,
       event(
         runId,
         "complete",
-        `Completed: ${agent.product} restock — S$${scrape.price.toFixed(2)}`,
+        `Completed: ${agent.product} — S$${scrape.price.toFixed(2)} (cheapest relevant match)`,
         "done",
         { scrape, paynow, transaction: tx }
       )

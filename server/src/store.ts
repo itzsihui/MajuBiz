@@ -1,4 +1,11 @@
-import type { ActivityEvent, Agent, DashboardState, Transaction } from "./types.js";
+import type {
+  ActivityEvent,
+  Agent,
+  DashboardState,
+  InventoryItem,
+  InventorySettings,
+  Transaction,
+} from "./types.js";
 
 const INITIAL_BALANCE = 500;
 
@@ -21,6 +28,35 @@ export const store: DashboardState = {
     },
   ],
   transactions: [],
+  inventory: [
+    {
+      id: "inv_bubble_wrap",
+      product: "bubble wrap",
+      unit: "rolls",
+      currentStock: 45,
+      reorderThreshold: 20,
+      linkedAgentId: "agt_seed",
+    },
+    {
+      id: "inv_carton_boxes",
+      product: "carton boxes",
+      unit: "boxes",
+      currentStock: 120,
+      reorderThreshold: 50,
+      linkedAgentId: null,
+    },
+    {
+      id: "inv_packing_tape",
+      product: "packing tape",
+      unit: "rolls",
+      currentStock: 18,
+      reorderThreshold: 15,
+      linkedAgentId: null,
+    },
+  ],
+  inventorySettings: {
+    autoSearchEnabled: false,
+  },
 };
 
 const runEvents = new Map<string, ActivityEvent[]>();
@@ -32,6 +68,8 @@ export function getState(): DashboardState {
     currency: store.currency,
     agents: [...store.agents],
     transactions: [...store.transactions],
+    inventory: store.inventory.map((item) => ({ ...item })),
+    inventorySettings: { ...store.inventorySettings },
   };
 }
 
@@ -78,4 +116,30 @@ export function clearRun(runId: string): void {
     runEvents.delete(runId);
     runSubscribers.delete(runId);
   }, 60_000);
+}
+
+export function updateInventorySettings(settings: Partial<InventorySettings>): InventorySettings {
+  store.inventorySettings = { ...store.inventorySettings, ...settings };
+  return { ...store.inventorySettings };
+}
+
+export function updateInventoryItem(
+  itemId: string,
+  patch: Partial<Pick<InventoryItem, "currentStock" | "reorderThreshold">>
+): InventoryItem | null {
+  const idx = store.inventory.findIndex((item) => item.id === itemId);
+  if (idx < 0) return null;
+  store.inventory[idx] = { ...store.inventory[idx], ...patch };
+  return { ...store.inventory[idx] };
+}
+
+export function getInventoryItem(itemId: string): InventoryItem | undefined {
+  return store.inventory.find((item) => item.id === itemId);
+}
+
+export function restockByAgent(agentId: string, quantity: number): void {
+  const item = store.inventory.find((i) => i.linkedAgentId === agentId);
+  if (item) {
+    item.currentStock += quantity;
+  }
 }

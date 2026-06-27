@@ -4,6 +4,7 @@ import {
   Circle,
   ListTree,
   Loader2,
+  Package,
   Plus,
   Shield,
   Wallet,
@@ -17,6 +18,9 @@ import {
   runAgent as runAgentApi,
   subscribeRunEvents,
 } from "./lib/api";
+import { InventoryView } from "./views/InventoryView";
+
+type AppTab = "dashboard" | "inventory";
 
 function formatMoney(amount: number) {
   return `S$${amount.toFixed(2)}`;
@@ -31,22 +35,41 @@ const STEP_ORDER = [
   "log",
   "start",
   "scrape",
+  "reasoning",
+  "compare",
   "scrape_done",
-  "source_url",
   "settle",
   "no_match",
   "complete",
   "error",
 ] as const;
 
+function stepSortIndex(step: string): number {
+  const idx = STEP_ORDER.indexOf(step as (typeof STEP_ORDER)[number]);
+  return idx >= 0 ? idx : 99;
+}
+
+interface AgentRunRecord {
+  activity: ActivityEvent[];
+  summary: string;
+  finishedAt: string | null;
+}
+
+function deriveRunSummary(events: ActivityEvent[]): string {
+  const terminal = events.find((e) => ["complete", "no_match", "error"].includes(e.step));
+  if (terminal) return terminal.message;
+  if (events.some((e) => e.status === "running")) return "Running…";
+  return "Run in progress…";
+}
+
 function mergeActivityEvents(prev: ActivityEvent[], incoming: ActivityEvent): ActivityEvent[] {
   const map = new Map(prev.map((e) => [e.step, e]));
   map.set(incoming.step, incoming);
 
-  const incomingIdx = STEP_ORDER.indexOf(incoming.step as (typeof STEP_ORDER)[number]);
+  const incomingIdx = stepSortIndex(incoming.step);
 
   for (const [step, event] of map) {
-    const idx = STEP_ORDER.indexOf(step as (typeof STEP_ORDER)[number]);
+    const idx = stepSortIndex(step);
     if (idx >= 0 && idx < incomingIdx && event.status === "running") {
       map.set(step, { ...event, status: "done" });
     }
@@ -60,7 +83,7 @@ function mergeActivityEvents(prev: ActivityEvent[], incoming: ActivityEvent): Ac
     }
   }
 
-  return STEP_ORDER.filter((s) => map.has(s)).map((s) => map.get(s)!);
+  return [...map.values()].sort((a, b) => stepSortIndex(a.step) - stepSortIndex(b.step));
 }
 
 function stepLabel(step: string): string {
@@ -68,8 +91,9 @@ function stepLabel(step: string): string {
     log: "Initiate",
     start: "Agent run",
     scrape: "Web search",
-    scrape_done: "Price found",
-    source_url: "Listing",
+    reasoning: "Agent Brain",
+    compare: "Price comparison",
+    scrape_done: "Decision",
     settle: "PayNow settlement",
     no_match: "No purchase",
     complete: "Complete",
@@ -93,9 +117,7 @@ function ActivityModal({
 }) {
   if (!open) return null;
 
-  const steps = [...activity].sort(
-    (a, b) => STEP_ORDER.indexOf(a.step as (typeof STEP_ORDER)[number]) - STEP_ORDER.indexOf(b.step as (typeof STEP_ORDER)[number])
-  );
+  const steps = [...activity].sort((a, b) => stepSortIndex(a.step) - stepSortIndex(b.step));
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
@@ -117,10 +139,32 @@ function ActivityModal({
               {steps.map((ev, i) => {
                 const isActive = ev.status === "running";
                 const isError = ev.status === "error";
-                const isUrlStep = ev.step === "source_url";
+                const scrapeData =
+                  ev.step === "scrape_done" && ev.data && typeof ev.data === "object"
+                    ? (ev.data as { url?: string; priceDetail?: string })
+                    : null;
+                const reasoningData =
+                  ev.step === "reasoning" && ev.data && typeof ev.data === "object"
+                    ? (ev.data as { thoughts?: string[] })
+                    : null;
+                const compareData =
+                  ev.step === "compare" && ev.data && typeof ev.data === "object"
+                    ? (ev.data as {
+                        comparisons?: Array<{
+                          title: string;
+                          total: number;
+                          relevant: boolean;
+                          selected: boolean;
+                        }>;
+                      })
+                    : null;
+                const scrapeProgress =
+                  ev.step === "scrape" && ev.data && typeof ev.data === "object"
+                    ? (ev.data as { progress?: string[] }).progress
+                    : null;
 
                 return (
-                  <li key={ev.step} className="flex gap-3">
+                  <li key={`${ev.step}-${ev.timestamp}`} className="flex gap-3">
                     <div className="flex flex-col items-center">
                       {isActive ? (
                         <Loader2 className="h-5 w-5 animate-spin text-brand-500" />
@@ -135,17 +179,54 @@ function ActivityModal({
                       <p className="text-xs font-medium uppercase tracking-wide text-slate-400">
                         Step {i + 1} · {stepLabel(ev.step)}
                       </p>
-                      {!isUrlStep && (
-                        <p className="mt-1 text-sm text-slate-800">{ev.message}</p>
+
+                      {ev.step === "scrape" && scrapeProgress?.length ? (
+                        <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto rounded-xl bg-sky-50 p-3 font-mono text-[11px] leading-relaxed text-sky-900">
+                          {scrapeProgress.map((line, j) => (
+                            <li key={j} className={j === scrapeProgress.length - 1 && isActive ? "font-medium" : ""}>
+                              {line}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : ev.step === "reasoning" && reasoningData?.thoughts ? (
+                        <ul className="mt-2 space-y-1.5 rounded-xl bg-violet-50 p-3 text-xs text-violet-900">
+                          {reasoningData.thoughts.map((t, j) => (
+                            <li key={j} className="flex gap-2">
+                              <span className="font-medium text-violet-400">{j + 1}.</span>
+                              <span>{t}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : ev.step === "compare" && compareData?.comparisons?.length ? (
+                        <div className="mt-2 space-y-1">
+                          {compareData.comparisons
+                            .filter((c) => c.relevant)
+                            .sort((a, b) => a.total - b.total)
+                            .map((c) => (
+                              <div
+                                key={c.title}
+                                className={`rounded-lg px-2 py-1 text-xs ${c.selected ? "bg-emerald-50 font-medium text-emerald-800 ring-1 ring-emerald-200" : "bg-slate-50 text-slate-600"}`}
+                              >
+                                {c.selected ? "★ Cheapest · " : ""}
+                                {formatMoney(c.total)} — {c.title}
+                              </div>
+                            ))}
+                          {!compareData.comparisons.some((c) => c.relevant) && (
+                            <p className="text-xs text-slate-600">{ev.message}</p>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="mt-1 whitespace-pre-line text-sm text-slate-800">{ev.message}</p>
                       )}
-                      {isUrlStep && (
+
+                      {scrapeData?.url && (
                         <a
-                          href={ev.message}
+                          href={scrapeData.url}
                           target="_blank"
                           rel="noreferrer"
-                          className="mt-1 block break-all text-sm text-brand-600 hover:underline"
+                          className="mt-1 block break-all text-xs text-brand-600 hover:underline"
                         >
-                          {ev.message}
+                          {scrapeData.url}
                         </a>
                       )}
                     </div>
@@ -288,15 +369,20 @@ export default function App() {
   const [state, setState] = useState<DashboardState | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
+  const [agentRuns, setAgentRuns] = useState<Record<string, AgentRunRecord>>({});
   const [activityOpen, setActivityOpen] = useState(false);
   const [activityAgentName, setActivityAgentName] = useState<string | null>(null);
+  const [viewingAgentId, setViewingAgentId] = useState<string | null>(null);
   const [lastPayNow, setLastPayNow] = useState<PayNowPayload | null>(null);
   const [monitorStatus, setMonitorStatus] = useState<"Ready" | "Running">("Ready");
   const [runningId, setRunningId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<AppTab>("dashboard");
+  const [autoSearchEnabled, setAutoSearchEnabled] = useState(false);
 
   const refresh = useCallback(async () => {
     const data = await fetchState();
     setState(data);
+    setAutoSearchEnabled(data.inventorySettings.autoSearchEnabled);
   }, []);
 
   useEffect(() => {
@@ -315,19 +401,36 @@ export default function App() {
     );
   };
 
-  const handleRun = async (agent: Agent) => {
-    if (agent.status === "running" || runningId) return;
-    setRunningId(agent.agentId);
-    setMonitorStatus("Running");
-    setActivity([]);
-    setActivityAgentName(agent.name);
-    setActivityOpen(true);
-    addLog(`Starting ${agent.name}...`, "running");
+  const subscribeToAgentRun = useCallback(
+    (agent: Agent, runId: string, initialEvents: ActivityEvent[] = []) => {
+      setRunningId(agent.agentId);
+      setMonitorStatus("Running");
+      setActivity(initialEvents);
+      setActivityAgentName(agent.name);
+      setViewingAgentId(agent.agentId);
+      setAgentRuns((prev) => ({
+        ...prev,
+        [agent.agentId]: {
+          activity: initialEvents,
+          summary: deriveRunSummary(initialEvents),
+          finishedAt: null,
+        },
+      }));
 
-    try {
-      const { runId } = await runAgentApi(agent.agentId);
       subscribeRunEvents(agent.agentId, runId, (ev) => {
-        setActivity((prev) => mergeActivityEvents(prev, ev));
+        setActivity((prev) => {
+          const next = mergeActivityEvents(prev, ev);
+          const finished = ["complete", "no_match", "error"].includes(ev.step);
+          setAgentRuns((r) => ({
+            ...r,
+            [agent.agentId]: {
+              activity: next,
+              summary: deriveRunSummary(next),
+              finishedAt: finished ? new Date().toISOString() : r[agent.agentId]?.finishedAt ?? null,
+            },
+          }));
+          return next;
+        });
         if (ev.step === "complete" && ev.data && typeof ev.data === "object") {
           const data = ev.data as { paynow?: PayNowPayload };
           if (data.paynow) setLastPayNow(data.paynow);
@@ -338,19 +441,67 @@ export default function App() {
           refresh();
         }
       });
+    },
+    [refresh]
+  );
+
+  const handleRun = async (agent: Agent) => {
+    if (agent.status === "running" || runningId) return;
+
+    const starting = mergeActivityEvents([], {
+      runId: "local",
+      step: "log",
+      message: `Starting ${agent.name}...`,
+      status: "running",
+      timestamp: new Date().toISOString(),
+    });
+
+    try {
+      const { runId } = await runAgentApi(agent.agentId);
+      subscribeToAgentRun(agent, runId, starting);
     } catch {
-      setActivity((prev) =>
-        mergeActivityEvents(prev, {
-          runId: "local",
-          step: "error",
-          message: "Failed to start agent run",
-          status: "error",
-          timestamp: new Date().toISOString(),
-        })
-      );
+      const errEvents = mergeActivityEvents(starting, {
+        runId: "local",
+        step: "error",
+        message: "Failed to start agent run",
+        status: "error",
+        timestamp: new Date().toISOString(),
+      });
+      setActivity(errEvents);
+      setAgentRuns((r) => ({
+        ...r,
+        [agent.agentId]: {
+          activity: errEvents,
+          summary: "Failed to start",
+          finishedAt: new Date().toISOString(),
+        },
+      }));
       setMonitorStatus("Ready");
       setRunningId(null);
     }
+  };
+
+  const handleInventoryTriggeredRun = (agent: Agent, runId: string) => {
+    if (runningId) return;
+    const starting = mergeActivityEvents([], {
+      runId,
+      step: "log",
+      message: `Auto-restock triggered for ${agent.name} — inventory below reorder level.`,
+      status: "running",
+      timestamp: new Date().toISOString(),
+    });
+    subscribeToAgentRun(agent, runId, starting);
+    setActivityOpen(true);
+  };
+
+  const openAgentActivity = (agent: Agent) => {
+    const isLive = runningId === agent.agentId;
+    const stored = agentRuns[agent.agentId];
+    if (!isLive && !stored) return;
+    setViewingAgentId(agent.agentId);
+    setActivityAgentName(agent.name);
+    setActivity(isLive ? activity : stored!.activity);
+    setActivityOpen(true);
   };
 
   const activeAgents = state?.agents.filter((a) => a.status === "ready" || a.status === "running").length ?? 0;
@@ -369,9 +520,28 @@ export default function App() {
           </div>
         </div>
         <nav className="space-y-1">
-          <a className="flex items-center gap-2 rounded-xl bg-brand-50 px-3 py-2 text-sm font-medium text-brand-700">
+          <button
+            type="button"
+            onClick={() => setActiveTab("dashboard")}
+            className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium ${
+              activeTab === "dashboard"
+                ? "bg-brand-50 text-brand-700"
+                : "text-slate-600 hover:bg-slate-50"
+            }`}
+          >
             <Bot className="h-4 w-4" /> Dashboard
-          </a>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("inventory")}
+            className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium ${
+              activeTab === "inventory"
+                ? "bg-brand-50 text-brand-700"
+                : "text-slate-600 hover:bg-slate-50"
+            }`}
+          >
+            <Package className="h-4 w-4" /> Inventory
+          </button>
         </nav>
         <div className="mt-auto space-y-3 rounded-xl border border-slate-100 bg-slate-50 p-3 text-xs text-slate-600">
           <div className="flex items-center gap-2">
@@ -387,8 +557,14 @@ export default function App() {
       <div className="flex flex-1 flex-col">
         <header className="flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
           <div>
-            <h1 className="text-xl font-semibold">Dashboard</h1>
-            <p className="text-sm text-slate-500">Zero-code agentic commerce for Singapore SMEs</p>
+            <h1 className="text-xl font-semibold">
+              {activeTab === "dashboard" ? "Dashboard" : "Inventory"}
+            </h1>
+            <p className="text-sm text-slate-500">
+              {activeTab === "dashboard"
+                ? "Zero-code agentic commerce for Singapore SMEs"
+                : "Track stock levels and auto-trigger purchasing agents"}
+            </p>
           </div>
           <div className="flex items-center gap-3">
             <span
@@ -411,6 +587,7 @@ export default function App() {
           </div>
         </header>
 
+        {activeTab === "dashboard" ? (
         <main className="flex-1 space-y-6 p-6">
           {/* KPIs */}
           <div className="grid gap-4 sm:grid-cols-2">
@@ -442,24 +619,12 @@ export default function App() {
           <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
             <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
               <h2 className="font-semibold">My Agents</h2>
-              <div className="flex items-center gap-2">
-                {activity.length > 0 && (
-                  <button
-                    onClick={() => setActivityOpen(true)}
-                    className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
-                  >
-                    <ListTree className="h-4 w-4" />
-                    View Activity
-                    {runningId && <Loader2 className="h-3.5 w-3.5 animate-spin text-brand-500" />}
-                  </button>
-                )}
-                <button
-                  onClick={() => setModalOpen(true)}
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
-                >
-                  <Plus className="h-4 w-4" /> New Agent
-                </button>
-              </div>
+              <button
+                onClick={() => setModalOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-brand-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
+              >
+                <Plus className="h-4 w-4" /> New Agent
+              </button>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -467,12 +632,17 @@ export default function App() {
                   <tr className="border-b border-slate-100 text-left text-slate-500">
                     <th className="px-5 py-3 font-medium">Agent</th>
                     <th className="px-5 py-3 font-medium">Rule</th>
+                    <th className="px-5 py-3 font-medium">Latest run</th>
                     <th className="px-5 py-3 font-medium">Status</th>
-                    <th className="px-5 py-3 font-medium">Action</th>
+                    <th className="px-5 py-3 font-medium">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {state?.agents.map((agent) => (
+                  {state?.agents.map((agent) => {
+                    const run = agentRuns[agent.agentId];
+                    const isRunning = runningId === agent.agentId;
+                    const hasActivity = isRunning || !!run;
+                    return (
                     <tr key={agent.agentId} className="border-b border-slate-50">
                       <td className="px-5 py-4">
                         <div className="font-medium">{agent.name}</div>
@@ -481,20 +651,42 @@ export default function App() {
                       <td className="px-5 py-4 text-slate-600">
                         Buy {agent.quantity} {agent.unit} if &lt; {formatMoney(agent.trigger.threshold)}
                       </td>
-                      <td className="px-5 py-4">
-                        <StatusBadge status={runningId === agent.agentId ? "running" : agent.status} />
+                      <td className="max-w-xs px-5 py-4 text-xs text-slate-500">
+                        {isRunning ? (
+                          <span className="inline-flex items-center gap-1 text-amber-600">
+                            <Loader2 className="h-3 w-3 animate-spin" /> Running…
+                          </span>
+                        ) : run ? (
+                          <span className="line-clamp-2">{run.summary}</span>
+                        ) : (
+                          "—"
+                        )}
                       </td>
                       <td className="px-5 py-4">
-                        <button
-                          onClick={() => handleRun(agent)}
-                          disabled={!!runningId}
-                          className="rounded-lg border border-brand-200 bg-brand-50 px-3 py-1.5 text-xs font-medium text-brand-700 hover:bg-brand-100 disabled:opacity-50"
-                        >
-                          Run Agent
-                        </button>
+                        <StatusBadge status={isRunning ? "running" : agent.status} />
+                      </td>
+                      <td className="px-5 py-4">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            onClick={() => handleRun(agent)}
+                            disabled={!!runningId}
+                            className="rounded-lg border border-brand-200 bg-brand-50 px-3 py-1.5 text-xs font-medium text-brand-700 hover:bg-brand-100 disabled:opacity-50"
+                          >
+                            Run Agent
+                          </button>
+                          <button
+                            onClick={() => openAgentActivity(agent)}
+                            disabled={!hasActivity}
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                          >
+                            <ListTree className="h-3.5 w-3.5" />
+                            View Activity
+                          </button>
+                        </div>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -553,6 +745,19 @@ export default function App() {
             <PayNowPanel payload={lastPayNow} />
           </div>
         </main>
+        ) : (
+          state && (
+            <InventoryView
+              state={state}
+              agents={state.agents}
+              autoSearchEnabled={autoSearchEnabled}
+              onAutoSearchChange={setAutoSearchEnabled}
+              onRefresh={refresh}
+              onAgentTriggered={handleInventoryTriggeredRun}
+              runningId={runningId}
+            />
+          )
+        )}
 
         <footer className="border-t border-slate-200 px-6 py-3 text-center text-xs text-slate-400">
           MajuBiz MVP Demo v0.1.0 — Built for Singapore SMEs at BUILD2026 · State resets on server restart
@@ -571,9 +776,11 @@ export default function App() {
       <ActivityModal
         open={activityOpen}
         onClose={() => setActivityOpen(false)}
-        activity={activity}
+        activity={
+          viewingAgentId && runningId === viewingAgentId ? activity : agentRuns[viewingAgentId ?? ""]?.activity ?? activity
+        }
         agentName={activityAgentName}
-        isRunning={!!runningId}
+        isRunning={!!runningId && viewingAgentId === runningId}
       />
     </div>
   );

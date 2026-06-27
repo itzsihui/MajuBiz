@@ -63,6 +63,31 @@ export interface DashboardState {
   currency: "SGD";
   agents: Agent[];
   transactions: Transaction[];
+  inventory: InventoryItem[];
+  inventorySettings: InventorySettings;
+}
+
+export interface InventoryItem {
+  id: string;
+  product: string;
+  unit: string;
+  currentStock: number;
+  reorderThreshold: number;
+  linkedAgentId: string | null;
+}
+
+export interface InventorySettings {
+  autoSearchEnabled: boolean;
+}
+
+export interface UpdateInventoryResult {
+  item: InventoryItem;
+  triggered: boolean;
+  lowStock: boolean;
+  runId?: string;
+  agentId?: string;
+  agentName?: string;
+  message?: string;
 }
 
 export interface ActivityEvent {
@@ -120,4 +145,28 @@ export function subscribeRunEvents(
 
   source.onerror = () => source.close();
   return () => source.close();
+}
+
+export async function updateInventorySettings(autoSearchEnabled: boolean): Promise<InventorySettings> {
+  const res = await fetch(`${API_BASE}/api/inventory/settings`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ autoSearchEnabled }),
+  });
+  if (!res.ok) throw new Error("Failed to update inventory settings");
+  const data = await res.json();
+  return data.settings;
+}
+
+export async function saveInventoryItem(
+  itemId: string,
+  patch: { currentStock?: number; reorderThreshold?: number }
+): Promise<UpdateInventoryResult> {
+  const res = await fetch(`${API_BASE}/api/inventory/${itemId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) throw new Error("Failed to save inventory");
+  return res.json();
 }

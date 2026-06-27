@@ -4,6 +4,7 @@ import express from "express";
 import path from "path";
 import { fileURLToPath } from "url";
 import { agentsRouter } from "./routes/agents.js";
+import { inventoryRouter } from "./routes/inventory.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -22,6 +23,7 @@ app.get("/api/health", (_req, res) => {
 });
 
 app.use("/api", agentsRouter);
+app.use("/api", inventoryRouter);
 
 if (isProd) {
   const clientDist = path.join(__dirname, "../../client/dist");
