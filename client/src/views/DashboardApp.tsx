@@ -8,11 +8,11 @@ import {
   Loader2,
   Package,
   Plus,
-  Shield,
   Wallet,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { BrandLogo } from "../components/BrandLogo";
 import type { ActivityEvent, Agent, DashboardState, PayNowPayload, PurchaseProposal } from "../lib/api";
 import {
   approveRun,
@@ -823,14 +823,9 @@ export default function DashboardApp() {
     <div className="flex min-h-screen">
       {/* Sidebar */}
       <aside className="hidden w-64 flex-col border-r border-slate-200 bg-white p-5 lg:flex">
-        <div className="mb-8 flex items-center gap-2">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-600 text-white">
-            <Shield className="h-5 w-5" />
-          </div>
-          <div>
-            <div className="font-semibold">MajuBiz</div>
-            <div className="text-xs text-slate-500">BUILD2026 MVP</div>
-          </div>
+        <div className="mb-8">
+          <BrandLogo className="h-14 w-auto" />
+          <div className="mt-2 text-xs text-slate-500">BUILD2026 MVP</div>
         </div>
         <nav className="space-y-1">
           <button

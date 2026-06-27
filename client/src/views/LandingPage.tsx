@@ -1,5 +1,6 @@
-import { ArrowRight, Bot, Shield, Sparkles, Wallet, Zap } from "lucide-react";
+import { ArrowRight, Bot, Sparkles, Wallet, Zap } from "lucide-react";
 import { Link } from "react-router-dom";
+import { BrandLogo } from "../components/BrandLogo";
 import { BackgroundBeamsWithCollision } from "../components/ui/BackgroundBeamsWithCollision";
 import { TextFlippingBoard } from "../components/ui/TextFlippingBoard";
 
@@ -46,12 +47,9 @@ export default function LandingPage() {
     <div className="min-h-screen bg-slate-950 text-white">
       <header className="fixed inset-x-0 top-0 z-50 border-b border-white/5 bg-slate-950/80 backdrop-blur-xl">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
-          <div className="flex items-center gap-2">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-600">
-              <Shield className="h-5 w-5 text-white" />
-            </div>
-            <div className="text-[10px] uppercase tracking-widest text-slate-500">BUILD2026</div>
-          </div>
+          <Link to="/" className="flex items-center">
+            <BrandLogo className="h-16 w-auto rounded-md sm:h-[4.5rem]" />
+          </Link>
           <Link
             to="/app"
             className="inline-flex items-center gap-2 rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-900 transition hover:bg-slate-100"
