@@ -35,6 +35,7 @@ export const store: DashboardState = {
       unit: "rolls",
       currentStock: 45,
       reorderThreshold: 20,
+      maxUnitPrice: 0.25,
       linkedAgentId: "agt_seed",
     },
     {
@@ -43,6 +44,7 @@ export const store: DashboardState = {
       unit: "boxes",
       currentStock: 120,
       reorderThreshold: 50,
+      maxUnitPrice: 5,
       linkedAgentId: null,
     },
     {
@@ -51,6 +53,7 @@ export const store: DashboardState = {
       unit: "rolls",
       currentStock: 18,
       reorderThreshold: 15,
+      maxUnitPrice: 3,
       linkedAgentId: null,
     },
   ],
@@ -68,7 +71,10 @@ export function getState(): DashboardState {
     currency: store.currency,
     agents: [...store.agents],
     transactions: [...store.transactions],
-    inventory: store.inventory.map((item) => ({ ...item })),
+    inventory: store.inventory.map((item) => ({
+      ...item,
+      maxUnitPrice: item.maxUnitPrice ?? defaultMaxUnitPrice(item.product),
+    })),
     inventorySettings: { ...store.inventorySettings },
   };
 }
@@ -80,6 +86,25 @@ export function addAgent(agent: Agent): void {
 export function updateAgent(agentId: string, patch: Partial<Agent>): void {
   const idx = store.agents.findIndex((a) => a.agentId === agentId);
   if (idx >= 0) store.agents[idx] = { ...store.agents[idx], ...patch };
+}
+
+export function deleteAgent(agentId: string): boolean {
+  const idx = store.agents.findIndex((a) => a.agentId === agentId);
+  if (idx < 0) return false;
+
+  store.agents.splice(idx, 1);
+
+  for (const item of store.inventory) {
+    if (item.linkedAgentId === agentId) {
+      item.linkedAgentId = null;
+    }
+  }
+
+  return true;
+}
+
+export function getAgent(agentId: string): Agent | undefined {
+  return store.agents.find((a) => a.agentId === agentId);
 }
 
 export function addTransaction(tx: Transaction): void {
@@ -125,7 +150,7 @@ export function updateInventorySettings(settings: Partial<InventorySettings>): I
 
 export function updateInventoryItem(
   itemId: string,
-  patch: Partial<Pick<InventoryItem, "currentStock" | "reorderThreshold" | "linkedAgentId">>
+  patch: Partial<Pick<InventoryItem, "currentStock" | "reorderThreshold" | "maxUnitPrice" | "linkedAgentId">>
 ): InventoryItem | null {
   const idx = store.inventory.findIndex((item) => item.id === itemId);
   if (idx < 0) return null;
@@ -157,18 +182,48 @@ function defaultRestockQuantity(item: InventoryItem): number {
   return Math.max(item.reorderThreshold, 25);
 }
 
+function defaultMaxUnitPrice(product: string): number {
+  const p = product.toLowerCase();
+  if (p.includes("box") || p.includes("carton")) return 5;
+  if (p.includes("wrap")) return 0.25;
+  if (p.includes("tape")) return 3;
+  return 10;
+}
+
+function restockBudget(item: InventoryItem, quantity: number): number {
+  const maxUnit = item.maxUnitPrice ?? defaultMaxUnitPrice(item.product);
+  return Math.round(quantity * maxUnit * 100) / 100;
+}
+
+function syncRestockAgentFromInventory(agent: Agent, item: InventoryItem): Agent {
+  const quantity = defaultRestockQuantity(item);
+  const maxUnit = item.maxUnitPrice ?? defaultMaxUnitPrice(item.product);
+  const threshold = restockBudget(item, quantity);
+  const unitLabel = item.unit.endsWith("es") ? item.unit.slice(0, -2) : item.unit.replace(/s$/, "");
+  const patch: Partial<Agent> = {
+    quantity,
+    trigger: { type: "price_below", threshold, currency: "SGD" },
+    prompt: `Auto-restock ${item.product} when inventory drops to ${item.reorderThreshold} ${item.unit}. Buy ${quantity} ${item.unit} at up to S$${maxUnit}/${unitLabel} (S$${threshold} total).`,
+  };
+  updateAgent(agent.agentId, patch);
+  return { ...agent, ...patch } as Agent;
+}
+
 export function createRestockAgentForInventory(item: InventoryItem): Agent {
   const quantity = defaultRestockQuantity(item);
+  const maxUnit = item.maxUnitPrice ?? defaultMaxUnitPrice(item.product);
+  const threshold = restockBudget(item, quantity);
+  const unitLabel = item.unit.endsWith("es") ? item.unit.slice(0, -2) : item.unit.replace(/s$/, "");
   const agent: Agent = {
     agentId: `agt_${crypto.randomUUID().slice(0, 8)}`,
     name: `${item.product.replace(/\b\w/g, (c) => c.toUpperCase())} Restock Agent`,
     product: item.product,
     quantity,
     unit: item.unit,
-    trigger: { type: "price_below", threshold: 15, currency: "SGD" },
+    trigger: { type: "price_below", threshold, currency: "SGD" },
     action: "auto_purchase",
     status: "ready",
-    prompt: `Auto-restock ${item.product} when inventory drops to ${item.reorderThreshold} ${item.unit} or below. Buy ${quantity} ${item.unit} if total price is under $15.`,
+    prompt: `Auto-restock ${item.product} when inventory drops to ${item.reorderThreshold} ${item.unit}. Buy ${quantity} ${item.unit} at up to S$${maxUnit}/${unitLabel} (S$${threshold} total).`,
     createdAt: new Date().toISOString(),
   };
   addAgent(agent);
@@ -184,13 +239,15 @@ export function resolveRestockAgent(item: InventoryItem): {
 } {
   if (item.linkedAgentId) {
     const linked = store.agents.find((a) => a.agentId === item.linkedAgentId);
-    if (linked) return { agent: linked, autoLinked: false, created: false };
+    if (linked) {
+      return { agent: syncRestockAgentFromInventory(linked, item), autoLinked: false, created: false };
+    }
   }
 
   const matched = findAgentForInventoryProduct(item.product);
   if (matched) {
     linkInventoryToAgent(item.id, matched.agentId);
-    return { agent: matched, autoLinked: true, created: false };
+    return { agent: syncRestockAgentFromInventory(matched, item), autoLinked: true, created: false };
   }
 
   const created = createRestockAgentForInventory(item);

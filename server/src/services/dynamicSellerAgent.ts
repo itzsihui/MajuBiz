@@ -59,13 +59,43 @@ function packLabel(packQty: number, unit: string, tier: number): string {
   return `${titleCase(unit)} — ${tierName} (${packQty} ${unit})`;
 }
 
-function listingPriceForPack(packQty: number, orderQty: number, threshold: number, tier: number): number {
-  const packsNeeded = Math.max(1, Math.ceil(orderQty / packQty));
-  const targetFraction = [0.68, 0.78, 0.88][tier] ?? 0.75;
-  const targetTotal = Math.max(1, threshold * targetFraction);
-  const raw = targetTotal / packsNeeded;
-  return Math.max(0.5, Math.round(raw * 100) / 100);
+/** Realistic SG marketplace unit price — threshold is a budget cap, not the listing price */
+function estimatePerUnitSgd(ctx: BuyerContext): number {
+  const p = `${ctx.product} ${ctx.prompt ?? ""}`.toLowerCase();
+  const unit = ctx.unit.toLowerCase();
+
+  if (/\bjordan/.test(p)) return 229;
+  if (/\b(nike|dunk|yeezy|travis|off[- ]white)\b/.test(p)) return 199;
+  if (/\b(sneaker|sneakers|trainer|trainers|footwear)\b/.test(p)) return 175;
+  if (/\b(adidas|puma|new balance)\b/.test(p)) return 159;
+  if (/\b(shoe|shoes)\b/.test(p) || unit === "pair" || unit === "pairs") return 169;
+
+  if (/\bshin.?chan|character\b/.test(p) && /cake/.test(p)) return 48;
+  if (/\b(cake|cakes|bake|birthday|customis|customiz)\b/.test(p)) return 42;
+
+  if (/bubble\s*wrap|bubble/.test(p)) return 0.19;
+  if (/carton|box/.test(p)) return 0.5;
+  if (/\b(tape|opp)\b/.test(p)) return 0.7;
+  if (/envelope/.test(p)) return 0.036;
+
+  if (/iphone|samsung|pixel|phone/.test(p)) return 899;
+  if (/laptop|macbook/.test(p)) return 1299;
+
+  return 12;
 }
+
+function listingPriceForPack(
+  packQty: number,
+  tier: number,
+  perUnit: number,
+  threshold: number
+): number {
+  const tierMult = [0.9, 1, 1.1][tier] ?? 1;
+  const packPrice = Math.max(0.5, Math.round(perUnit * packQty * tierMult * 100) / 100);
+  return Math.min(packPrice, threshold);
+}
+
+const SELLER_CACHE_VERSION = "v2-market";
 
 function buildListingUrl(product: string, listingId: string): string {
   const { host, pathPrefix } = inferChannel(product);
@@ -106,10 +136,11 @@ export function generateSellerAgent(ctx: BuyerContext): SellerAgent {
   const name = `${productTitle} Seller Agent`;
   const keywords = extractKeywords(ctx.product, ctx.prompt);
   const packSizes = pickPackSizes(Math.max(1, ctx.quantity));
+  const perUnit = estimatePerUnitSgd(ctx);
 
   const listings: SellerListing[] = packSizes.map((packQty, tier) => {
     const listingId = `lst_${hashString(`${sellerId}_${packQty}_${tier}`).toString(36)}`;
-    const listingPriceSgd = listingPriceForPack(packQty, ctx.quantity, ctx.threshold, tier);
+    const listingPriceSgd = listingPriceForPack(packQty, tier, perUnit, ctx.threshold);
     const title = `${productTitle} — ${packLabel(packQty, ctx.unit, tier)}`;
 
     return {
@@ -150,11 +181,12 @@ function registerListings(listings: SellerListing[]) {
 }
 
 export function getOrCreateSellerAgent(agent: Agent): SellerAgent {
-  const cached = agentCache.get(agent.agentId);
+  const cacheKey = `${SELLER_CACHE_VERSION}:${agent.agentId}`;
+  const cached = agentCache.get(cacheKey);
   if (cached) return cached;
 
   const created = generateSellerAgent(contextFromAgent(agent));
-  agentCache.set(agent.agentId, created);
+  agentCache.set(cacheKey, created);
   return created;
 }
 
@@ -163,7 +195,7 @@ export function getOrCreateSellerAgentForQuery(
   opts?: { quantity?: number; unit?: string; threshold?: number }
 ): SellerAgent {
   const product = query.trim() || "supplies";
-  const seed = `q:${product.toLowerCase()}`;
+  const seed = `${SELLER_CACHE_VERSION}:q:${product.toLowerCase()}`;
   const cached = agentCache.get(seed);
   if (cached) return cached;
 

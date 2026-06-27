@@ -2,10 +2,35 @@ import { AlertTriangle, CheckCircle2, ListTree, Loader2, Package, Save } from "l
 import { useEffect, useState } from "react";
 import type { Agent, DashboardState, InventoryItem } from "../lib/api";
 import { saveInventoryItem, updateInventorySettings } from "../lib/api";
+import { formatRunTimestamp } from "../lib/agentRunStorage";
 
 interface DraftValues {
-  currentStock: number;
-  reorderThreshold: number;
+  currentStock: string;
+  reorderThreshold: string;
+  maxUnitPrice: string;
+}
+
+function draftFromItem(item: InventoryItem): DraftValues {
+  return {
+    currentStock: String(item.currentStock),
+    reorderThreshold: String(item.reorderThreshold),
+    maxUnitPrice: String(item.maxUnitPrice ?? 5),
+  };
+}
+
+function parseDraftNumber(raw: string, fallback: number): number {
+  const trimmed = raw.trim();
+  if (!trimmed) return fallback;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function draftsEqual(a: DraftValues, b: DraftValues): boolean {
+  return (
+    a.currentStock === b.currentStock &&
+    a.reorderThreshold === b.reorderThreshold &&
+    a.maxUnitPrice === b.maxUnitPrice
+  );
 }
 
 export interface InventoryAgentRun {
@@ -62,10 +87,7 @@ export function InventoryView({
   useEffect(() => {
     const next: Record<string, DraftValues> = {};
     for (const item of state.inventory) {
-      next[item.id] = {
-        currentStock: item.currentStock,
-        reorderThreshold: item.reorderThreshold,
-      };
+      next[item.id] = draftFromItem(item);
     }
     setDrafts(next);
   }, [state.inventory]);
@@ -91,11 +113,22 @@ export function InventoryView({
     const draft = drafts[item.id];
     if (!draft) return;
 
+    const currentStock = Math.max(0, Math.round(parseDraftNumber(draft.currentStock, item.currentStock)));
+    const reorderThreshold = Math.max(
+      0,
+      Math.round(parseDraftNumber(draft.reorderThreshold, item.reorderThreshold))
+    );
+    const maxUnitPrice = Math.max(
+      0.01,
+      Math.round(parseDraftNumber(draft.maxUnitPrice, item.maxUnitPrice ?? 5) * 100) / 100
+    );
+
     setSavingId(item.id);
     try {
       const result = await saveInventoryItem(item.id, {
-        currentStock: draft.currentStock,
-        reorderThreshold: draft.reorderThreshold,
+        currentStock,
+        reorderThreshold,
+        maxUnitPrice,
       });
       await onRefresh();
 
@@ -110,7 +143,7 @@ export function InventoryView({
       } else if (result.message) {
         onToast(result.message, result.lowStock ? "warning" : "info");
       } else {
-        onToast(`Saved ${item.product} — ${draft.currentStock} ${item.unit} in stock`, "success");
+        onToast(`Saved ${item.product} — ${currentStock} ${item.unit} in stock`, "success");
       }
     } catch {
       onToast(`Failed to save ${item.product}.`, "error");
@@ -119,7 +152,7 @@ export function InventoryView({
     }
   };
 
-  const updateDraft = (itemId: string, field: keyof DraftValues, value: number) => {
+  const updateDraft = (itemId: string, field: keyof DraftValues, value: string) => {
     setDrafts((prev) => ({
       ...prev,
       [itemId]: { ...prev[itemId], [field]: value },
@@ -128,7 +161,8 @@ export function InventoryView({
 
   const restockAgentForItem = (item: InventoryItem) => {
     if (item.linkedAgentId) {
-      return agents.find((a) => a.agentId === item.linkedAgentId) ?? null;
+      const linked = agents.find((a) => a.agentId === item.linkedAgentId);
+      if (linked) return linked;
     }
     const norm = item.product.toLowerCase().replace(/[^a-z0-9]/g, "");
     return (
@@ -205,6 +239,7 @@ export function InventoryView({
                 <th className="px-5 py-3 font-medium">Product</th>
                 <th className="px-5 py-3 font-medium">In stock</th>
                 <th className="px-5 py-3 font-medium">Reorder at</th>
+                <th className="px-5 py-3 font-medium">Max $/unit</th>
                 <th className="px-5 py-3 font-medium">Status</th>
                 <th className="px-5 py-3 font-medium">Restock agent</th>
                 <th className="px-5 py-3 font-medium">Latest run</th>
@@ -213,21 +248,19 @@ export function InventoryView({
             </thead>
             <tbody>
               {state.inventory.map((item) => {
-                const draft = drafts[item.id] ?? {
-                  currentStock: item.currentStock,
-                  reorderThreshold: item.reorderThreshold,
-                };
-                const preview = { ...item, ...draft };
+                const saved = draftFromItem(item);
+                const draft = drafts[item.id] ?? saved;
+                const previewStock = parseDraftNumber(draft.currentStock, item.currentStock);
+                const previewReorder = parseDraftNumber(draft.reorderThreshold, item.reorderThreshold);
+                const preview = { ...item, currentStock: previewStock, reorderThreshold: previewReorder };
                 const status = stockStatus(preview);
                 const StatusIcon = status.icon;
                 const agent = restockAgentForItem(item);
-                const isDirty =
-                  draft.currentStock !== item.currentStock ||
-                  draft.reorderThreshold !== item.reorderThreshold;
+                const isDirty = !draftsEqual(draft, saved);
                 const isSaving = savingId === item.id;
                 const agentRunning = !!agent && runningId === agent.agentId;
                 const run = agent ? agentRuns[agent.agentId] : undefined;
-                const hasActivity = agentRunning || !!run;
+                const lastRunAt = formatRunTimestamp(run?.finishedAt);
 
                 return (
                   <tr key={item.id} className="border-b border-slate-50">
@@ -237,29 +270,33 @@ export function InventoryView({
                     </td>
                     <td className="px-5 py-4">
                       <input
-                        type="number"
-                        min={0}
+                        type="text"
+                        inputMode="numeric"
                         value={draft.currentStock}
-                        onChange={(e) =>
-                          updateDraft(item.id, "currentStock", Math.max(0, Number(e.target.value) || 0))
-                        }
+                        onChange={(e) => updateDraft(item.id, "currentStock", e.target.value)}
                         className="w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
                       />
                     </td>
                     <td className="px-5 py-4">
                       <input
-                        type="number"
-                        min={0}
+                        type="text"
+                        inputMode="numeric"
                         value={draft.reorderThreshold}
-                        onChange={(e) =>
-                          updateDraft(
-                            item.id,
-                            "reorderThreshold",
-                            Math.max(0, Number(e.target.value) || 0)
-                          )
-                        }
+                        onChange={(e) => updateDraft(item.id, "reorderThreshold", e.target.value)}
                         className="w-24 rounded-lg border border-slate-200 px-2 py-1.5 text-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
                       />
+                    </td>
+                    <td className="px-5 py-4">
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-slate-400">S$</span>
+                        <input
+                          type="text"
+                          inputMode="decimal"
+                          value={draft.maxUnitPrice}
+                          onChange={(e) => updateDraft(item.id, "maxUnitPrice", e.target.value)}
+                          className="w-20 rounded-lg border border-slate-200 px-2 py-1.5 text-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                        />
+                      </div>
                     </td>
                     <td className="px-5 py-4">
                       <span
@@ -286,9 +323,14 @@ export function InventoryView({
                           <Loader2 className="h-3 w-3 animate-spin" /> Running…
                         </span>
                       ) : run ? (
-                        <span className="line-clamp-2">{run.summary}</span>
+                        <div className="space-y-0.5">
+                          <span className="line-clamp-2">{run.summary}</span>
+                          {lastRunAt && (
+                            <span className="block text-[10px] text-slate-400">Last run: {lastRunAt}</span>
+                          )}
+                        </div>
                       ) : (
-                        "—"
+                        <span className="text-slate-400">No runs yet</span>
                       )}
                     </td>
                     <td className="px-5 py-4">
@@ -310,8 +352,7 @@ export function InventoryView({
                           <button
                             type="button"
                             onClick={() => onViewActivity(agent)}
-                            disabled={!hasActivity}
-                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
                           >
                             <ListTree className="h-3.5 w-3.5" />
                             View Activity

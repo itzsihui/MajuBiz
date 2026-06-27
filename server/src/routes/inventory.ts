@@ -37,9 +37,11 @@ inventoryRouter.patch("/inventory/:id", async (req, res) => {
     typeof req.body?.currentStock === "number" ? req.body.currentStock : undefined;
   const reorderThreshold =
     typeof req.body?.reorderThreshold === "number" ? req.body.reorderThreshold : undefined;
+  const maxUnitPrice =
+    typeof req.body?.maxUnitPrice === "number" ? req.body.maxUnitPrice : undefined;
 
-  if (currentStock === undefined && reorderThreshold === undefined) {
-    res.status(400).json({ error: "currentStock or reorderThreshold required" });
+  if (currentStock === undefined && reorderThreshold === undefined && maxUnitPrice === undefined) {
+    res.status(400).json({ error: "currentStock, reorderThreshold, or maxUnitPrice required" });
     return;
   }
 
@@ -56,9 +58,15 @@ inventoryRouter.patch("/inventory/:id", async (req, res) => {
     return;
   }
 
+  if (maxUnitPrice !== undefined && (maxUnitPrice <= 0 || !Number.isFinite(maxUnitPrice))) {
+    res.status(400).json({ error: "maxUnitPrice must be a positive number" });
+    return;
+  }
+
   const updated = updateInventoryItem(id, {
     ...(currentStock !== undefined ? { currentStock: Math.round(currentStock) } : {}),
     ...(reorderThreshold !== undefined ? { reorderThreshold: Math.round(reorderThreshold) } : {}),
+    ...(maxUnitPrice !== undefined ? { maxUnitPrice: Math.round(maxUnitPrice * 100) / 100 } : {}),
   });
 
   if (!updated) {

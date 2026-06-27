@@ -6,11 +6,11 @@ import { searchSellerAgentCatalog, type SellerAgentCandidate } from "./sellerAge
 export function searchSellerAgentFallback(
   agent: Agent,
   progress?: (msg: string) => void,
-  opts?: { exaPriceFloor?: number; quiet?: boolean }
+  opts?: { quiet?: boolean }
 ): SellerAgentCandidate[] {
   if (!opts?.quiet) {
     const sellerAgent = getOrCreateSellerAgent(agent);
     progress?.(`Seller Agent — ${sellerAgent.name} responding with quotes…`);
   }
-  return searchSellerAgentCatalog(agent, 8, opts);
+  return searchSellerAgentCatalog(agent, 8);
 }

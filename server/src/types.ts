@@ -111,6 +111,8 @@ export interface InventoryItem {
   unit: string;
   currentStock: number;
   reorderThreshold: number;
+  /** Max acceptable price per unit (e.g. S$5/box). Total budget = restock qty × this. */
+  maxUnitPrice: number;
   linkedAgentId: string | null;
 }
 

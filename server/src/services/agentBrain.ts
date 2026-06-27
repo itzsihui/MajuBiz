@@ -133,6 +133,13 @@ export async function decidePurchase(
       ? `Specific intent: ${modifiers.join(", ")}`
       : `Generic request — prefer the most typical match for "${agent.product}"`;
 
+  const isRestock = /auto-restock|restock/i.test(agent.prompt);
+  const unitBudget =
+    agent.quantity > 0 ? Math.round((agent.trigger.threshold / agent.quantity) * 100) / 100 : null;
+  const budgetNote = isRestock && unitBudget
+    ? `Inventory restock — max S$${unitBudget.toFixed(2)} per ${agent.unit.replace(/s$/, "")} (S$${agent.trigger.threshold.toFixed(2)} total for ${agent.quantity} ${agent.unit})`
+    : `Max budget (total): S$${agent.trigger.threshold.toFixed(2)}`;
+
   const listingBlock = options
     .map(
       (o) =>
@@ -158,7 +165,7 @@ Rules:
 - Customised cake listings on Carousell often include the character/theme in the URL path — trust the URL slug if it matches the request.
 - Only select listings that truly match what the owner asked to buy.
 - Among RELEVANT listings, pick the CHEAPEST total order cost.
-- Only purchase if cheapest relevant total ≤ budget threshold S$${agent.trigger.threshold.toFixed(2)}.
+- Only purchase if cheapest relevant total ≤ budget threshold S$${agent.trigger.threshold.toFixed(2)}${isRestock && unitBudget ? ` (≈ S$${unitBudget.toFixed(2)} per unit)` : ""}.
 - If selectedIndex is -1, no purchase.
 - thoughts: 4-8 short sentences showing your reasoning chain.`,
         },
@@ -169,7 +176,7 @@ Rules:
 
 Parsed product: "${agent.product}"
 Quantity: ${agent.quantity} ${agent.unit}
-Max budget (total): S$${agent.trigger.threshold.toFixed(2)}
+${budgetNote}
 ${intentNote}
 
 Listings found by Exa web search (${listingCount} URLs ranked, showing ${options.length}):

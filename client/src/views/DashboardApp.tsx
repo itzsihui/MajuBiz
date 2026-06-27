@@ -8,20 +8,23 @@ import {
   Loader2,
   Package,
   Plus,
+  Trash2,
   Wallet,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BrandLogo } from "../components/BrandLogo";
 import type { ActivityEvent, Agent, DashboardState, PayNowPayload, PurchaseProposal } from "../lib/api";
 import {
   approveRun,
+  deleteAgent as deleteAgentApi,
   fetchState,
   parseAgent,
   rejectRun,
   runAgent as runAgentApi,
   subscribeRunEvents,
 } from "../lib/api";
+import { formatRunTimestamp, loadAgentRuns, saveAgentRuns } from "../lib/agentRunStorage";
 import { InventoryView } from "./InventoryView";
 import { Link } from "react-router-dom";
 
@@ -155,8 +158,30 @@ function deriveRunSummary(events: ActivityEvent[]): string {
   return "Run in progress…";
 }
 
+function dominantRunId(events: ActivityEvent[]): string | null {
+  const serverEvents = events.filter((e) => e.runId !== "local");
+  return serverEvents.length > 0 ? serverEvents[serverEvents.length - 1]!.runId : null;
+}
+
+function scopeActivityToRun(events: ActivityEvent[], runId: string | null): ActivityEvent[] {
+  if (!runId) return events;
+  return events.filter((e) => e.runId === "local" || e.runId === runId);
+}
+
+/** Hide payment steps until the owner approves (guards against stale events from prior runs). */
+function activityForDisplay(events: ActivityEvent[], activeRunId: string | null): ActivityEvent[] {
+  const runId = activeRunId ?? dominantRunId(events);
+  const scoped = scopeActivityToRun(events, runId);
+  const awaitingApproval = scoped.some((e) => e.step === "approval" && e.status === "running");
+  if (!awaitingApproval) return scoped;
+  return scoped.filter((e) => e.step !== "settle" && e.step !== "complete");
+}
+
 function mergeActivityEvents(prev: ActivityEvent[], incoming: ActivityEvent): ActivityEvent[] {
-  const map = new Map(prev.map((e) => [e.step, e]));
+  const runId = incoming.runId !== "local" ? incoming.runId : dominantRunId(prev);
+  const scoped = scopeActivityToRun(prev, runId);
+
+  const map = new Map(scoped.map((e) => [e.step, e]));
   map.set(incoming.step, incoming);
 
   const incomingIdx = stepSortIndex(incoming.step);
@@ -201,6 +226,7 @@ function ActivityModal({
   open,
   onClose,
   activity,
+  activeRunId,
   agentName,
   isRunning,
   pendingApproval,
@@ -211,6 +237,7 @@ function ActivityModal({
   open: boolean;
   onClose: () => void;
   activity: ActivityEvent[];
+  activeRunId: string | null;
   agentName: string | null;
   isRunning: boolean;
   pendingApproval: PurchaseProposal | null;
@@ -220,7 +247,9 @@ function ActivityModal({
 }) {
   if (!open) return null;
 
-  const steps = [...activity].sort((a, b) => stepSortIndex(a.step) - stepSortIndex(b.step));
+  const steps = activityForDisplay(activity, isRunning ? activeRunId : null).sort(
+    (a, b) => stepSortIndex(a.step) - stepSortIndex(b.step)
+  );
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4">
@@ -610,7 +639,7 @@ export default function DashboardApp() {
   const [state, setState] = useState<DashboardState | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [activity, setActivity] = useState<ActivityEvent[]>([]);
-  const [agentRuns, setAgentRuns] = useState<Record<string, AgentRunRecord>>({});
+  const [agentRuns, setAgentRuns] = useState<Record<string, AgentRunRecord>>(() => loadAgentRuns());
   const [activityOpen, setActivityOpen] = useState(false);
   const [activityAgentName, setActivityAgentName] = useState<string | null>(null);
   const [viewingAgentId, setViewingAgentId] = useState<string | null>(null);
@@ -626,7 +655,13 @@ export default function DashboardApp() {
     proposal: PurchaseProposal;
   } | null>(null);
   const [approvalLoading, setApprovalLoading] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const runEventsUnsubRef = useRef<(() => void) | null>(null);
+
+  useEffect(() => {
+    return () => runEventsUnsubRef.current?.();
+  }, []);
 
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -651,6 +686,10 @@ export default function DashboardApp() {
     refresh().catch(console.error);
   }, [refresh]);
 
+  useEffect(() => {
+    saveAgentRuns(agentRuns);
+  }, [agentRuns]);
+
   const addLog = (message: string, status: ActivityEvent["status"] = "done") => {
     setActivity((prev) =>
       mergeActivityEvents(prev, {
@@ -665,9 +704,13 @@ export default function DashboardApp() {
 
   const subscribeToAgentRun = useCallback(
     (agent: Agent, runId: string, initialEvents: ActivityEvent[] = []) => {
+      runEventsUnsubRef.current?.();
+      runEventsUnsubRef.current = null;
+
       setRunningId(agent.agentId);
       setActiveRunId(runId);
       setMonitorStatus("Running");
+      setPendingApproval(null);
       setActivity(initialEvents);
       setActivityAgentName(agent.name);
       setViewingAgentId(agent.agentId);
@@ -680,7 +723,9 @@ export default function DashboardApp() {
         },
       }));
 
-      subscribeRunEvents(agent.agentId, runId, (ev) => {
+      runEventsUnsubRef.current = subscribeRunEvents(agent.agentId, runId, (ev) => {
+        if (ev.runId !== "local" && ev.runId !== runId) return;
+
         setActivity((prev) => {
           const next = mergeActivityEvents(prev, ev);
           const finished = ["complete", "no_match", "rejected", "error"].includes(ev.step);
@@ -714,6 +759,8 @@ export default function DashboardApp() {
           pushToast(ev.message || `${agent.name} run failed`, "error");
         }
         if (ev.step === "complete" || ev.step === "no_match" || ev.step === "rejected" || ev.step === "error") {
+          runEventsUnsubRef.current?.();
+          runEventsUnsubRef.current = null;
           setMonitorStatus("Ready");
           setRunningId(null);
           setActiveRunId(null);
@@ -775,13 +822,44 @@ export default function DashboardApp() {
     pushToast(`Auto-restock started — ${agent.name} is searching now`, "info");
   };
 
+  const handleDelete = async (agent: Agent) => {
+    if (runningId || deletingId) return;
+    if (agent.status === "running") {
+      pushToast("Wait for the agent to finish before deleting", "warning");
+      return;
+    }
+
+    const ok = window.confirm(`Delete "${agent.name}"? This cannot be undone.`);
+    if (!ok) return;
+
+    setDeletingId(agent.agentId);
+    try {
+      await deleteAgentApi(agent.agentId);
+      setAgentRuns((prev) => {
+        const next = { ...prev };
+        delete next[agent.agentId];
+        return next;
+      });
+      if (viewingAgentId === agent.agentId) {
+        setActivityOpen(false);
+        setViewingAgentId(null);
+        setActivityAgentName(null);
+      }
+      await refresh();
+      pushToast(`Deleted ${agent.name}`, "success");
+    } catch (err) {
+      pushToast(err instanceof Error ? err.message : "Failed to delete agent", "error");
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   const openAgentActivity = (agent: Agent) => {
     const isLive = runningId === agent.agentId;
     const stored = agentRuns[agent.agentId];
-    if (!isLive && !stored) return;
     setViewingAgentId(agent.agentId);
     setActivityAgentName(agent.name);
-    setActivity(isLive ? activity : stored!.activity);
+    setActivity(isLive ? activity : stored?.activity ?? []);
     setActivityOpen(true);
   };
 
@@ -930,13 +1008,18 @@ export default function DashboardApp() {
             <CommercePipeline
               activeStep={
                 runningId
-                  ? activity.some((e) => e.step === "settle" || e.step === "complete")
+                  ? activityForDisplay(activity, activeRunId).some(
+                      (e) => e.step === "settle" || e.step === "complete"
+                    )
                     ? "pay"
-                    : activity.some((e) => e.step === "reasoning" || e.step === "compare")
+                    : activityForDisplay(activity, activeRunId).some(
+                          (e) => e.step === "reasoning" || e.step === "compare"
+                        )
                       ? "brain"
-                      : activity.some((e) =>
-                            e.step === "scrape" &&
-                            (e.data as { progress?: string[] })?.progress?.some(isSellerAgentProgressLine)
+                      : activityForDisplay(activity, activeRunId).some(
+                            (e) =>
+                              e.step === "scrape" &&
+                              (e.data as { progress?: string[] })?.progress?.some(isSellerAgentProgressLine)
                           )
                         ? "seller"
                         : "search"
@@ -971,7 +1054,7 @@ export default function DashboardApp() {
                   {state?.agents.map((agent) => {
                     const run = agentRuns[agent.agentId];
                     const isRunning = runningId === agent.agentId;
-                    const hasActivity = isRunning || !!run;
+                    const lastRunAt = formatRunTimestamp(run?.finishedAt);
                     return (
                     <tr key={agent.agentId} className="border-b border-slate-50">
                       <td className="px-5 py-4">
@@ -987,9 +1070,14 @@ export default function DashboardApp() {
                             <Loader2 className="h-3 w-3 animate-spin" /> Running…
                           </span>
                         ) : run ? (
-                          <span className="line-clamp-2">{run.summary}</span>
+                          <div className="space-y-0.5">
+                            <span className="line-clamp-2">{run.summary}</span>
+                            {lastRunAt && (
+                              <span className="block text-[10px] text-slate-400">Last run: {lastRunAt}</span>
+                            )}
+                          </div>
                         ) : (
-                          "—"
+                          <span className="text-slate-400">No runs yet</span>
                         )}
                       </td>
                       <td className="px-5 py-4">
@@ -1006,11 +1094,23 @@ export default function DashboardApp() {
                           </button>
                           <button
                             onClick={() => openAgentActivity(agent)}
-                            disabled={!hasActivity}
-                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                            className="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
                           >
                             <ListTree className="h-3.5 w-3.5" />
                             View Activity
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(agent)}
+                            disabled={!!runningId || !!deletingId || isRunning}
+                            className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-3 py-1.5 text-xs font-medium text-red-600 hover:bg-red-50 disabled:opacity-40"
+                          >
+                            {deletingId === agent.agentId ? (
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-3.5 w-3.5" />
+                            )}
+                            Delete
                           </button>
                         </div>
                       </td>
@@ -1109,6 +1209,7 @@ export default function DashboardApp() {
       <ActivityModal
         open={activityOpen}
         onClose={() => setActivityOpen(false)}
+        activeRunId={activeRunId}
         activity={
           viewingAgentId && runningId === viewingAgentId ? activity : agentRuns[viewingAgentId ?? ""]?.activity ?? activity
         }

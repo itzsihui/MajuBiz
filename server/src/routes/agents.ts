@@ -2,6 +2,8 @@ import { Router } from "express";
 import { v4 as uuidv4 } from "uuid";
 import {
   addAgent,
+  deleteAgent,
+  getAgent,
   getRunEvents,
   getState,
   subscribeRun,
@@ -63,6 +65,24 @@ agentsRouter.post("/agents/:id/run", async (req, res) => {
   const runId = uuidv4();
   void runAgent(agent, runId);
   res.status(202).json({ runId, status: "started" });
+});
+
+agentsRouter.delete("/agents/:id", (req, res) => {
+  const { id } = req.params;
+  const agent = getAgent(id);
+
+  if (!agent) {
+    res.status(404).json({ error: "Agent not found" });
+    return;
+  }
+
+  if (agent.status === "running") {
+    res.status(409).json({ error: "Cannot delete an agent while it is running" });
+    return;
+  }
+
+  deleteAgent(id);
+  res.json({ ok: true, agentId: id });
 });
 
 agentsRouter.get("/agents/:id/events", (req, res) => {

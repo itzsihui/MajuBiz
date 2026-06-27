@@ -73,6 +73,7 @@ export interface InventoryItem {
   unit: string;
   currentStock: number;
   reorderThreshold: number;
+  maxUnitPrice: number;
   linkedAgentId: string | null;
 }
 
@@ -147,6 +148,14 @@ export async function runAgent(agentId: string): Promise<{ runId: string }> {
   return res.json();
 }
 
+export async function deleteAgent(agentId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/api/agents/${agentId}`, { method: "DELETE" });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error ?? "Failed to delete agent");
+  }
+}
+
 export async function approveRun(runId: string): Promise<void> {
   const res = await fetch(`${API_BASE}/api/runs/${runId}/approve`, { method: "POST" });
   if (!res.ok) throw new Error("Failed to approve purchase");
@@ -192,7 +201,7 @@ export async function updateInventorySettings(autoSearchEnabled: boolean): Promi
 
 export async function saveInventoryItem(
   itemId: string,
-  patch: { currentStock?: number; reorderThreshold?: number }
+  patch: { currentStock?: number; reorderThreshold?: number; maxUnitPrice?: number }
 ): Promise<UpdateInventoryResult> {
   const res = await fetch(`${API_BASE}/api/inventory/${itemId}`, {
     method: "PATCH",

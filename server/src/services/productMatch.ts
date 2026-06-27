@@ -78,6 +78,7 @@ export function listingRelevanceScore(agent: Agent, title: string, url: string):
   if (blob.includes("help-to-buy") || blob.includes("help to buy")) score -= 6;
   if (url.includes("carousell.sg/p/")) score += 1;
   if (url.includes("shopee.sg")) score += 1;
+  if (url.includes("lazada.sg")) score += 1;
 
   return score;
 }

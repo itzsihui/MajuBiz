@@ -83,6 +83,10 @@ function titleFromListingUrl(url: string): string | null {
   if (shopee) {
     return decodeURIComponent(shopee[1].replace(/-/g, " "));
   }
+  const lazada = url.match(/lazada\.sg\/products\/([^/?]+)/i);
+  if (lazada) {
+    return decodeURIComponent(lazada[1].replace(/-/g, " "));
+  }
   return null;
 }
 
@@ -92,6 +96,7 @@ function buildSearchQueries(agent: Agent): Array<{ query: string; domains: strin
 
   const queries: Array<{ query: string; domains: string[] }> = [
     { query: `${product} shopee.sg`, domains: ["shopee.sg"] },
+    { query: `${product} site:lazada.sg`, domains: ["lazada.sg"] },
     { query: `${product} packaging Singapore`, domains: ["shopee.sg", "lazada.sg"] },
     { query: `${product} ${agent.quantity} ${agent.unit}`, domains: ["shopee.sg", "carousell.sg", "lazada.sg"] },
     { query: `${product} wholesale bulk`, domains: ["shopee.sg", "lazada.sg"] },
@@ -112,26 +117,40 @@ function collectListingCandidates(
   agent: Agent
 ) {
   const seen = new Set<string>();
-  const candidates: { url: string; title: string; score: number }[] = [];
+  const snippetByUrl = new Map<string, string>();
+  const candidates: { url: string; title: string; score: number; searchSnippet?: string }[] = [];
 
-  const add = (rawUrl: string, title: string) => {
+  const mergeSnippet = (url: string, snippet: string) => {
+    const prev = snippetByUrl.get(url) ?? "";
+    snippetByUrl.set(url, `${prev} ${snippet}`.trim().slice(0, 4000));
+  };
+
+  const add = (rawUrl: string, title: string, snippet?: string) => {
     const url = canonicalListingUrl(rawUrl);
-    if (!isProductListingUrl(url) || seen.has(url)) return;
+    if (!isProductListingUrl(url)) return;
+    if (snippet) mergeSnippet(url, snippet);
+
+    if (seen.has(url)) {
+      const existing = candidates.find((c) => c.url === url);
+      if (existing) existing.searchSnippet = snippetByUrl.get(url);
+      return;
+    }
+
     const slugTitle = titleFromListingUrl(url);
     const bestTitle = slugTitle && slugTitle.length > 3 ? slugTitle : title;
     if (!matchesProductKeywords(agent, bestTitle, url)) return;
     seen.add(url);
     const score = listingRelevanceScore(agent, bestTitle, url);
-    candidates.push({ url, title: bestTitle, score });
+    candidates.push({ url, title: bestTitle, score, searchSnippet: snippetByUrl.get(url) });
   };
 
   for (const r of results) {
+    const snippet = [r.title ?? "", r.text ?? "", ...(r.highlights ?? [])].join(" ");
     if (r.url && isProductListingUrl(r.url)) {
-      add(r.url, r.title ?? agent.product);
+      add(r.url, r.title ?? agent.product, snippet);
     }
-    const blob = [r.title ?? "", r.text ?? "", ...(r.highlights ?? [])].join(" ");
-    for (const url of findProductUrlsInText(blob)) {
-      add(url, r.title ?? agent.product);
+    for (const url of findProductUrlsInText(snippet)) {
+      add(url, r.title ?? agent.product, snippet);
     }
   }
 
@@ -143,8 +162,12 @@ function parsePackFromTitle(title: string): number | null {
   for (const p of [
     /=\s*(\d+)\s*pcs?\b/i,
     /(\d+)\s*rolls?\b/i,
-    /\((\d+)\s*(?:pcs|pc|pieces|rolls|units|pkts|pkt|pack|boxes)\)/i,
-    /(\d+)\s*(?:pcs|pc|pieces|rolls|units|pkts|pkt|pack|boxes)\s*(?:\/|per|\b)/i,
+    /\((\d+)\s*(?:pcs|pc|pieces|rolls|units|pkts|pkt|pack|boxes|box)\)/i,
+    /(\d+)\s*(?:pcs|pc|pieces|rolls|units|pkts|pkt|pack|boxes|box)\s*(?:\/|per|\b)/i,
+    /pack\s*of\s*(\d+)/i,
+    /(\d+)\s*\/\s*pack/i,
+    /(\d+)\s*box(?:es)?\b/i,
+    /(\d+)\s*cartons?\b/i,
   ]) {
     const m = title.match(p);
     if (m) return parseInt(m[1], 10);
@@ -152,38 +175,90 @@ function parsePackFromTitle(title: string): number | null {
   return null;
 }
 
+function isCarousellListing(url: string): boolean {
+  return /carousell\.sg\/p\//i.test(url);
+}
+
+function inferPackQuantity(agent: Agent, title: string, listingPrice: number, parsedFromTitle: number | null, url?: string): number {
+  if (parsedFromTitle && parsedFromTitle > 0) return parsedFromTitle;
+  // Carousell listings are priced per single item (e.g. S$4/box)
+  if (url && isCarousellListing(url) && listingPrice > 0 && listingPrice <= 50) return 1;
+
+  const p = agent.product.toLowerCase();
+  if (!(p.includes("box") || p.includes("carton"))) return 1;
+
+  const candidates = [agent.quantity, 100, 50, 25, 20, 10, 5];
+  for (const qty of candidates) {
+    const perUnit = listingPrice / qty;
+    if (perUnit >= 0.12 && perUnit <= 8 && listingPrice <= maxPlausiblePackPrice(agent)) {
+      return qty;
+    }
+  }
+  return 1;
+}
+
 function parsePricesFromText(text: string): number[] {
   const prices: number[] = [];
   const lower = text.toLowerCase();
-  for (const m of text.matchAll(/(?:^|[^\d])S\$?\s*(\d+(?:\.\d{1,2})?)\b/gi)) {
-    const idx = m.index ?? 0;
-    const before = lower.slice(Math.max(0, idx - 24), idx);
-    if (/\b(save|off|discount|qty|quantity|min\.?\s*order|per\s*)\s*$/i.test(before)) continue;
-    const n = parseFloat(m[1]);
-    if (n >= 0.5 && n <= MAX_LISTING_PRICE_SGD) prices.push(n);
+  const patterns = [
+    /(?:^|[^\d])S\$?\s*(\d+(?:\.\d{1,2})?)\b/gi,
+    /(?:^|[^\d])SGD\s*(\d+(?:\.\d{1,2})?)\b/gi,
+    /(?:^|[^\d])\$\s*(\d+(?:\.\d{1,2})?)\b/g,
+    /(?:price|now|sale|only)[:\s]*S?\$?\s*(\d+(?:\.\d{1,2})?)/gi,
+  ];
+  for (const pattern of patterns) {
+    for (const m of text.matchAll(pattern)) {
+      const idx = m.index ?? 0;
+      const before = lower.slice(Math.max(0, idx - 24), idx);
+      if (/\b(save|off|discount|qty|quantity|min\.?\s*order|per\s*)\s*$/i.test(before)) continue;
+      const n = parseFloat(m[1]);
+      if (n >= 0.5 && n <= MAX_LISTING_PRICE_SGD) prices.push(n);
+    }
   }
   return prices;
 }
 
-/** Prefer median listing price — avoids "Save S$5" / qty numbers picked as the main price */
-function pickListingPrice(prices: number[]): number | null {
-  if (!prices.length) return null;
-  const sorted = [...new Set(prices)].sort((a, b) => a - b);
-  if (sorted.length === 1) return sorted[0];
-
-  const median = sorted[Math.floor(sorted.length / 2)];
-  const filtered = sorted.filter((p) => p >= median * 0.55);
-  const pool = filtered.length ? filtered : sorted;
-  return pool[Math.floor(pool.length / 2)];
+function maxUnitBudget(agent: Agent): number {
+  return agent.trigger.threshold / Math.max(1, agent.quantity);
 }
 
-function resolveListingPrice(summaryPrice: number | null, pageText: string): number | null {
-  const fromText = pickListingPrice(parsePricesFromText(pageText));
+function filterPricesForAgent(prices: number[], agent: Agent, url?: string): number[] {
+  const p = agent.product.toLowerCase();
+  const maxUnit = maxUnitBudget(agent);
+  let cap = MAX_LISTING_PRICE_SGD;
+
+  if (p.includes("box") || p.includes("carton")) {
+    cap = Math.min(cap, Math.max(15, maxUnit * 4));
+    if (url && isCarousellListing(url)) cap = Math.min(cap, Math.max(12, maxUnit * 2.5));
+  } else if (p.includes("wrap") || p.includes("tape")) {
+    cap = Math.min(cap, Math.max(8, maxUnit * 20));
+  }
+
+  return prices.filter((price) => price <= cap);
+}
+
+/** Prefer median listing price — Carousell uses cheapest listed variant (S$4 not S$4.50) */
+function pickListingPrice(prices: number[], agent: Agent, url?: string): number | null {
+  const filtered = filterPricesForAgent(prices, agent, url);
+  if (!filtered.length) return null;
+  const sorted = [...new Set(filtered)].sort((a, b) => a - b);
+  if (sorted.length === 1) return sorted[0];
+  if (url && isCarousellListing(url)) return sorted[0];
+
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const pool = sorted.filter((p) => p >= median * 0.55);
+  return (pool.length ? pool : sorted)[Math.floor((pool.length ? pool : sorted).length / 2)];
+}
+
+function resolveListingPrice(summaryPrice: number | null, pageText: string, agent: Agent, url?: string): number | null {
+  const fromText = pickListingPrice(parsePricesFromText(pageText), agent, url);
   if (summaryPrice === null) return fromText;
-  if (fromText === null) return summaryPrice;
-  if (summaryPrice < fromText * 0.65) return fromText;
-  if (fromText > summaryPrice * 1.4) return fromText;
-  return summaryPrice;
+  if (fromText === null) return clampSummaryPrice(summaryPrice, agent);
+  const summary = clampSummaryPrice(summaryPrice, agent);
+  if (summary === null) return fromText;
+  if (summary < fromText * 0.65) return fromText;
+  if (fromText > summary * 1.4) return fromText;
+  return summary;
 }
 
 const MAX_LISTING_PRICE_SGD = 250;
@@ -212,12 +287,15 @@ function isPricePlausible(agent: Agent, listingPrice: number, packQuantity: numb
 
   const packsNeeded = Math.max(1, Math.ceil(agent.quantity / Math.max(1, packQuantity)));
   const orderTotal = packsNeeded * listingPrice;
-  if (orderTotal > agent.trigger.threshold * 2.5) return false;
+  if (orderTotal > agent.trigger.threshold * 1.05) return false;
 
   const perUnit = listingPrice / Math.max(1, packQuantity);
+  const budgetPerUnit = maxUnitBudget(agent);
+  if (perUnit > budgetPerUnit * 1.05) return false;
+
   const p = agent.product.toLowerCase();
-  if (p.includes("box") || p.includes("carton")) return perUnit >= 0.35 && perUnit <= 8;
-  if (p.includes("wrap") || p.includes("tape")) return perUnit >= 0.02 && perUnit <= 3;
+  if (p.includes("box") || p.includes("carton")) return perUnit >= 0.12 && perUnit <= Math.min(8, budgetPerUnit * 1.05);
+  if (p.includes("wrap") || p.includes("tape")) return perUnit >= 0.02 && perUnit <= Math.min(3, budgetPerUnit * 1.05);
   if (p.includes("cake")) return listingPrice >= 15 && listingPrice <= 120;
   return true;
 }
@@ -235,14 +313,45 @@ function computeOrderTotal(agent: Agent, listingPrice: number, packQuantity: num
   return { total, packsNeeded, priceDetail };
 }
 
+function extractPriceFromSearchSnippet(
+  agent: Agent,
+  url: string,
+  title: string,
+  searchSnippet: string,
+  defaultPackQty: number
+): { listingPrice: number; packQuantity: number; supplier: string } | null {
+  const parsedPack = parsePackFromTitle(title);
+  const pageText = sanitizeTextForPriceParsing(`${title} ${searchSnippet}`, url);
+  const listingPrice = resolveListingPrice(null, pageText, agent, url);
+  if (listingPrice === null) return null;
+
+  const packQuantity =
+    defaultPackQty > 1
+      ? defaultPackQty
+      : inferPackQuantity(agent, title, listingPrice, parsedPack, url);
+  if (!isPricePlausible(agent, listingPrice, packQuantity)) return null;
+  if (isLikelyWrongSubtype(agent, title, url)) return null;
+
+  return { listingPrice, packQuantity, supplier: title.slice(0, 80) };
+}
+
 async function extractFromListing(
   exa: Exa,
   url: string,
   title: string,
   agent: Agent,
-  preset?: { listingPrice?: number; packQuantity?: number }
-) {
-  const defaultPackQty = preset?.packQuantity ?? parsePackFromTitle(title) ?? 1;
+  preset?: { listingPrice?: number; packQuantity?: number; searchSnippet?: string }
+): Promise<{
+  listingPrice: number;
+  packQuantity: number;
+  supplier: string;
+  url: string;
+  highlights?: string[];
+  imageUrl?: string;
+  priceSource?: "search-snippet" | "page";
+} | null> {
+  const parsedPack = parsePackFromTitle(title);
+  const defaultPackQty = preset?.packQuantity ?? parsedPack ?? 1;
   if (preset?.listingPrice && preset.listingPrice > 0) {
     return {
       listingPrice: preset.listingPrice,
@@ -251,6 +360,22 @@ async function extractFromListing(
       url,
     };
   }
+
+  // Search highlights already include prices — use them directly, skip full page fetch
+  if (preset?.searchSnippet?.trim()) {
+    const fromSnippet = extractPriceFromSearchSnippet(
+      agent,
+      url,
+      title,
+      preset.searchSnippet,
+      defaultPackQty
+    );
+    if (fromSnippet) {
+      return { ...fromSnippet, url, priceSource: "search-snippet" };
+    }
+  }
+
+  // Fallback: fetch listing page only when search snippet had no usable price
   try {
     const detail = await exa.getContents([url], {
       highlights: { query: "price SGD listing price", maxCharacters: 1200 },
@@ -273,7 +398,6 @@ async function extractFromListing(
       summary?: string;
       image?: string;
     };
-    let listingPrice: number | null = null;
     let packQuantity = defaultPackQty;
     let supplier = title;
     let summaryPrice: number | null = null;
@@ -292,11 +416,14 @@ async function extractFromListing(
       } catch { /* ignore */ }
     }
     const pageText = sanitizeTextForPriceParsing(
-      `${page?.title ?? title} ${(page?.highlights ?? []).join(" ")}`,
+      `${page?.title ?? title} ${(page?.highlights ?? []).join(" ")} ${preset?.searchSnippet ?? ""}`,
       url
     );
-    listingPrice = resolveListingPrice(summaryPrice, pageText);
+    const listingPrice = resolveListingPrice(summaryPrice, pageText, agent, url);
     if (listingPrice === null) return null;
+    if (packQuantity === 1 && !parsedPack) {
+      packQuantity = inferPackQuantity(agent, `${title} ${supplier}`, listingPrice, parsedPack, url);
+    }
     if (!isPricePlausible(agent, listingPrice, packQuantity)) return null;
     if (isLikelyWrongSubtype(agent, supplier, url)) return null;
 
@@ -307,18 +434,10 @@ async function extractFromListing(
       url,
       highlights: page?.highlights?.slice(0, 2),
       imageUrl: page?.image,
+      priceSource: "page",
     };
   } catch {
-    const prices = parsePricesFromText(title);
-    const listingPrice = pickListingPrice(prices);
-    if (!listingPrice || !isPricePlausible(agent, listingPrice, defaultPackQty)) return null;
-    if (isLikelyWrongSubtype(agent, title, url)) return null;
-    return {
-      listingPrice,
-      packQuantity: defaultPackQty,
-      supplier: title.slice(0, 80),
-      url,
-    };
+    return null;
   }
 }
 
@@ -372,7 +491,16 @@ function hasRelevantSelection(brain: BrainDecision): boolean {
 async function buildOptionsFromCandidates(
   exa: Exa,
   agent: Agent,
-  candidates: Array<{ url: string; title: string; listingPrice?: number; packQuantity?: number; source?: ScrapeResult["source"]; sellerName?: string; sellerId?: string }>,
+  candidates: Array<{
+    url: string;
+    title: string;
+    listingPrice?: number;
+    packQuantity?: number;
+    source?: ScrapeResult["source"];
+    sellerName?: string;
+    sellerId?: string;
+    searchSnippet?: string;
+  }>,
   progress: (msg: string) => void,
   limit = 12,
   label = "Exa"
@@ -390,24 +518,31 @@ async function buildOptionsFromCandidates(
   >();
 
   let skipped = 0;
+  let snippetHits = 0;
 
-  for (const { url, title, listingPrice, packQuantity, source, sellerName, sellerId } of candidates.slice(0, limit)) {
+  for (const { url, title, listingPrice, packQuantity, source, sellerName, sellerId, searchSnippet } of candidates.slice(0, limit)) {
     const isSeller = source === "seller-agent";
-    const extracted = await extractFromListing(exa, url, title, agent, { listingPrice, packQuantity });
+    const extracted = await extractFromListing(exa, url, title, agent, { listingPrice, packQuantity, searchSnippet });
     if (!extracted) {
       if (!isSeller) skipped++;
       continue;
     }
 
     const { total, packsNeeded, priceDetail } = computeOrderTotal(agent, extracted.listingPrice, extracted.packQuantity);
-    if (total > agent.trigger.threshold * 2.5) {
+    if (total > agent.trigger.threshold * 1.05) {
       if (!isSeller) skipped++;
       continue;
     }
+    const perUnit = extracted.listingPrice / Math.max(1, extracted.packQuantity);
+    const marketplace = url.includes("lazada.sg") ? "Lazada" : url.includes("shopee.sg") ? "Shopee" : url.includes("carousell.sg") ? "Carousell" : "Exa";
+    const priceLabel = `S$${perUnit.toFixed(2)}/${agent.unit.replace(/s$/, "")} · order S$${total.toFixed(2)}`;
     if (isSeller) {
-      progress(`  ✓ Seller Agent: S$${total.toFixed(2)} — ${title.slice(0, 45)}`);
+      progress(`  ✓ Seller Agent: ${priceLabel} — ${title.slice(0, 40)}`);
+    } else if (extracted.priceSource === "search-snippet") {
+      snippetHits++;
+      progress(`  ✓ Exa highlight (${marketplace}): ${priceLabel} — ${extracted.supplier.slice(0, 40)}`);
     } else {
-      progress(`  ✓ Live via Exa: S$${total.toFixed(2)} — ${extracted.supplier.slice(0, 45)}`);
+      progress(`  ✓ Exa page (${marketplace}): ${priceLabel} — ${extracted.supplier.slice(0, 40)}`);
     }
 
     const idx = options.length;
@@ -431,7 +566,10 @@ async function buildOptionsFromCandidates(
   }
 
   if (skipped > 0 && label === "Exa") {
-    progress(`  (${skipped} listing(s) skipped — no price on page)`);
+    progress(`  (${skipped} listing(s) skipped — no price in search highlights or page)`);
+  }
+  if (snippetHits > 0 && label === "Exa") {
+    progress(`  (${snippetHits} priced from Exa search highlights — no page fetch needed)`);
   }
 
   return { options, extractedMap };
@@ -442,10 +580,9 @@ async function mergeSellerAgentOptions(
   agent: Agent,
   options: ListingOption[],
   extractedMap: Map<number, { highlights?: string[]; imageUrl?: string; source?: ScrapeResult["source"]; sellerName?: string; sellerAgentId?: string }>,
-  progress: (msg: string) => void,
-  exaPriceFloor: number
+  progress: (msg: string) => void
 ) {
-  const sellerHits = searchSellerAgentFallback(agent, progress, { exaPriceFloor, quiet: true });
+  const sellerHits = searchSellerAgentFallback(agent, progress, { quiet: true });
   progress(`Seller Agent — comparing structured quotes alongside Exa…`);
   const seen = new Set(options.map((o) => o.url));
   const fresh = sellerHits.filter((h) => !seen.has(h.url));
@@ -483,7 +620,7 @@ export async function scrapePrice(agent: Agent, onProgress?: ScrapeProgressFn): 
           type: "auto",
           numResults: 12,
           includeDomains: q.domains,
-          contents: { highlights: { query: `price ${agent.product} SGD`, maxCharacters: 600 } },
+          contents: { highlights: { query: `price SGD ${agent.product}`, maxCharacters: 900 } },
         })
       )
     );
@@ -519,7 +656,7 @@ export async function scrapePrice(agent: Agent, onProgress?: ScrapeProgressFn): 
 
     let { options, extractedMap } = exaOnlyCandidates.length
       ? await (async () => {
-          progress(`Exa — reading prices…`);
+          progress(`Exa — reading prices from search highlights…`);
           return buildOptionsFromCandidates(exa, agent, exaOnlyCandidates, progress, 8);
         })()
       : { options: [] as ListingOption[], extractedMap: new Map() };
@@ -537,7 +674,7 @@ export async function scrapePrice(agent: Agent, onProgress?: ScrapeProgressFn): 
     } else {
       const minExaTotal = Math.min(...options.map((o) => o.totalPrice));
       if (minExaTotal <= agent.trigger.threshold * 2) {
-        await mergeSellerAgentOptions(exa, agent, options, extractedMap, progress, minExaTotal);
+        await mergeSellerAgentOptions(exa, agent, options, extractedMap, progress);
       }
     }
 
