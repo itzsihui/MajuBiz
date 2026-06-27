@@ -1,44 +1,71 @@
-import { ArrowRight, Bot, Sparkles, Wallet, Zap } from "lucide-react";
+import { ArrowRight, Package, Search, ShieldCheck, Sparkles, Wallet, Zap } from "lucide-react";
 import { Link } from "react-router-dom";
 import { BrandLogo } from "../components/BrandLogo";
 import { BackgroundBeamsWithCollision } from "../components/ui/BackgroundBeamsWithCollision";
 import { TextFlippingBoard } from "../components/ui/TextFlippingBoard";
 
 const FLAP_PHRASES = [
-  "BUBBLE WRAP",
   "AUTO RESTOCK",
-  "PAYNOW GEN2",
+  "EXA SEARCH",
   "SELLER AGENT",
+  "BANK CONFIRM",
+  "PAYNOW GEN2",
   "SINGAPORE SME",
 ];
 
 const STEPS = [
-  { n: "01", title: "Describe", body: "Type a plain-English rule — no code, no JSON." },
-  { n: "02", title: "Discover", body: "Exa searches live listings; seller agents return structured quotes." },
-  { n: "03", title: "Approve", body: "Agent Brain picks the best deal — you confirm before payment." },
-  { n: "04", title: "Settle", body: "PayNow Gen 2-style payload with invoice line items and refs." },
+  {
+    n: "01",
+    title: "Describe",
+    body: "Type a plain-English rule — or let inventory auto-trigger when stock drops below your reorder level.",
+  },
+  {
+    n: "02",
+    title: "Discover",
+    body: "Exa scans Shopee, Carousell, Lazada, and the open web; seller agents fill gaps with structured quotes.",
+  },
+  {
+    n: "03",
+    title: "Approve",
+    body: "Agent Brain ranks the best deal — review payee, UEN, and amount in a PayLah-style modal before you pay.",
+  },
+  {
+    n: "04",
+    title: "Settle",
+    body: "Phased PayNow Gen 2 simulation — SUBMITTED through COMPLETED — with invoice line items and a receipt.",
+  },
 ];
 
 const FEATURES = [
   {
     icon: Sparkles,
     title: "Plain English agents",
-    body: "Describe what to buy in one sentence. GPT-4o-mini turns it into purchase rules — no code.",
+    body: "Describe what to buy in one sentence. GPT-4o-mini turns it into purchase rules — no code, no JSON.",
+  },
+  {
+    icon: Search,
+    title: "Live web + marketplace search",
+    body: "Exa ranks listings across Shopee, Carousell, Lazada, and the broader web — not one platform only.",
   },
   {
     icon: Zap,
-    title: "Exa + Seller Agent",
-    body: "Live web search first, then structured seller-agent quotes when marketplaces aren't agent-ready.",
+    title: "Agent-Ready sellers",
+    body: "When marketplaces have no public buy-side API, simulated seller agents return structured quotes alongside Exa.",
   },
   {
-    icon: Bot,
-    title: "Human in the loop",
-    body: "Agent Brain picks the best deal — you approve before PayNow settlement fires.",
+    icon: Package,
+    title: "Inventory auto-restock",
+    body: "Track packaging stock in the dashboard. Toggle auto-search — when levels dip, the linked agent runs itself.",
+  },
+  {
+    icon: ShieldCheck,
+    title: "Bank-style confirmation",
+    body: "Every purchase opens a PayLah-style confirm screen — you see amount, payee, and refs before settlement fires.",
   },
   {
     icon: Wallet,
-    title: "PayNow Gen 2 mock",
-    body: "Structured request-to-pay JSON with invoice line items and reconciliation refs — MAS-ready narrative.",
+    title: "PayNow Gen 2 simulator",
+    body: "Watch SUBMITTED → VALIDATED → SENT → COMPLETED with structured request-to-pay JSON and receipt cards.",
   },
 ];
 
@@ -73,9 +100,9 @@ export default function LandingPage() {
             </span>
           </h1>
 
-          <p className="mx-auto mt-6 max-w-xl text-center text-lg text-slate-400">
-            Zero-code AI agents search Shopee & Carousell, negotiate via seller APIs, and settle with PayNow Gen
-            2-style structured payments.
+          <p className="mx-auto mt-6 max-w-2xl text-center text-lg text-slate-400">
+            Zero-code AI agents scout Shopee, Carousell, Lazada, and the open web via Exa, compare Agent-Ready seller
+            quotes, and settle through a simulated PayNow Gen 2 rail — you approve every payment.
           </p>
 
           <div className="mt-10 flex flex-wrap items-center justify-center gap-4">
@@ -104,7 +131,7 @@ export default function LandingPage() {
         <div className="mx-auto max-w-6xl px-6">
           <h2 className="text-center text-3xl font-bold tracking-tight">How it works</h2>
           <p className="mx-auto mt-3 max-w-xl text-center text-slate-400">
-            From plain English to PayNow settlement — four steps, zero code.
+            From plain English or low-stock alerts to bank confirm and PayNow receipt — four steps, zero code.
           </p>
           <div className="mt-14 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
             {STEPS.map((step) => (
@@ -128,7 +155,7 @@ export default function LandingPage() {
             MAS is laying groundwork for autonomous purchasing. MajuBiz shows what that looks like for a Tampines
             packaging shop — today.
           </p>
-          <div className="mt-14 grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="mt-14 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
             {FEATURES.map(({ icon: Icon, title, body }) => (
               <div
                 key={title}
