@@ -83,3 +83,13 @@ export function getPendingApproval(runId: string): PurchaseProposal | null {
   if (!entry) return null;
   return buildProposal(entry.agent, entry.scrape, entry.brain);
 }
+
+export function getPendingRunContext(runId: string): {
+  agent: Agent;
+  scrape: ScrapeResult;
+  brain: BrainDecision;
+} | null {
+  const entry = pending.get(runId);
+  if (!entry) return null;
+  return { agent: entry.agent, scrape: entry.scrape, brain: entry.brain };
+}

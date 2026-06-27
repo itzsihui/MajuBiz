@@ -467,7 +467,7 @@ function toScrape(
     price: option.totalPrice,
     currency: "SGD",
     url: option.url,
-    matched: selected && option.totalPrice < agent.trigger.threshold,
+    matched: selected && option.totalPrice <= agent.trigger.threshold,
     relevant: verdict?.relevant ?? false,
     relevanceReason: verdict?.reason ?? brain.summary,
     listingPrice: option.listingPrice,
@@ -603,7 +603,7 @@ export async function scrapePrice(agent: Agent, onProgress?: ScrapeProgressFn): 
     const { total, packsNeeded, priceDetail } = computeOrderTotal(agent, 9.5, 50);
     const brain = emptyBrain([`Demo mode — add EXA_API_KEY`, priceDetail], "Demo fallback");
     return {
-      scrape: { ...FALLBACK, product: agent.product, price: total, matched: total < agent.trigger.threshold, packsNeeded, priceDetail, thoughtProcess: brain.thoughts },
+      scrape: { ...FALLBACK, product: agent.product, price: total, matched: total <= agent.trigger.threshold, packsNeeded, priceDetail, thoughtProcess: brain.thoughts },
       brain,
     };
   }

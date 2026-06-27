@@ -7,17 +7,23 @@ import {
   ListTree,
   Loader2,
   Package,
+  Plug,
   Plus,
+  Receipt,
+  Settings,
   Trash2,
   Wallet,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BrandLogo } from "../components/BrandLogo";
-import type { ActivityEvent, Agent, DashboardState, PayNowPayload, PurchaseProposal } from "../lib/api";
+import { PayNowBankModal } from "../components/PayNowBankModal";
+import { PayNowReceipt } from "../components/PayNowReceipt";
+import type { ActivityEvent, Agent, DashboardState, PayNowPayload, PayNowPreview, PurchaseProposal } from "../lib/api";
 import {
   approveRun,
   deleteAgent as deleteAgentApi,
+  fetchPayNowPreview,
   fetchState,
   parseAgent,
   rejectRun,
@@ -25,25 +31,39 @@ import {
   subscribeRunEvents,
 } from "../lib/api";
 import { formatRunTimestamp, loadAgentRuns, saveAgentRuns } from "../lib/agentRunStorage";
+import { IntegrationsView } from "./IntegrationsView";
 import { InventoryView } from "./InventoryView";
+import { PaymentsView } from "./PaymentsView";
+import { SettingsView } from "./SettingsView";
 import { Link } from "react-router-dom";
 
-type AppTab = "dashboard" | "inventory";
+type AppTab = "dashboard" | "inventory" | "payments" | "integrations" | "settings";
+
+const TAB_META: Record<AppTab, { title: string; subtitle: string }> = {
+  dashboard: {
+    title: "Dashboard",
+    subtitle: "Zero-code agentic commerce for Singapore SMEs",
+  },
+  inventory: {
+    title: "Inventory",
+    subtitle: "Track stock levels and auto-trigger purchasing agents",
+  },
+  payments: {
+    title: "Payments",
+    subtitle: "PayNow Gen 2 settlements and payment history",
+  },
+  integrations: {
+    title: "Integrations",
+    subtitle: "Slack, CRM — create agents from where your team already works",
+  },
+  settings: {
+    title: "Settings",
+    subtitle: "Business name, contact details, and shipping address for agents",
+  },
+};
 
 function formatMoney(amount: number) {
   return `S$${amount.toFixed(2)}`;
-}
-
-function sourceLabel(source: string, sellerName?: string) {
-  if (source === "exa") return { text: "Live via Exa", className: "bg-violet-50 text-violet-700" };
-  if (source === "seller-agent") {
-    return {
-      text: sellerName ? `${sellerName}` : "Seller Agent API",
-      className: "bg-emerald-50 text-emerald-700",
-    };
-  }
-  if (source === "shopee-open") return { text: "Shopee Open Platform", className: "bg-orange-50 text-orange-700" };
-  return { text: "Demo fallback", className: "bg-amber-50 text-amber-700" };
 }
 
 function isSellerAgentProgressLine(line: string): boolean {
@@ -230,7 +250,7 @@ function ActivityModal({
   agentName,
   isRunning,
   pendingApproval,
-  onApprove,
+  onProceedToPay,
   onReject,
   approvalLoading,
 }: {
@@ -241,7 +261,7 @@ function ActivityModal({
   agentName: string | null;
   isRunning: boolean;
   pendingApproval: PurchaseProposal | null;
-  onApprove: () => void;
+  onProceedToPay: () => void;
   onReject: () => void;
   approvalLoading: boolean;
 }) {
@@ -294,6 +314,10 @@ function ActivityModal({
                   ev.step === "scrape" && ev.data && typeof ev.data === "object"
                     ? (ev.data as { progress?: string[] }).progress
                     : null;
+                const settleProgress =
+                  ev.step === "settle" && ev.data && typeof ev.data === "object"
+                    ? (ev.data as { progress?: string[] }).progress
+                    : null;
                 const approvalData =
                   ev.step === "approval" && ev.data && typeof ev.data === "object"
                     ? (ev.data as { proposal?: PurchaseProposal; approved?: boolean })
@@ -323,10 +347,23 @@ function ActivityModal({
                       {showApprovalCard ? (
                         <ApprovalCard
                           proposal={approvalData?.proposal ?? pendingApproval!}
-                          onApprove={onApprove}
+                          onProceedToPay={onProceedToPay}
                           onReject={onReject}
                           loading={approvalLoading}
                         />
+                      ) : ev.step === "settle" && settleProgress?.length ? (
+                        <ul className="mt-2 space-y-1.5 rounded-xl bg-rose-50 p-3 font-mono text-[11px] leading-relaxed text-rose-950">
+                          {settleProgress.map((line, j) => (
+                            <li
+                              key={j}
+                              className={
+                                j === settleProgress.length - 1 && isActive ? "font-semibold text-[#c41230]" : ""
+                              }
+                            >
+                              {line}
+                            </li>
+                          ))}
+                        </ul>
                       ) : ev.step === "scrape" && scrapeProgress?.length ? (
                         <ul className="mt-2 max-h-48 space-y-1 overflow-y-auto rounded-xl bg-sky-50 p-3 font-mono text-[11px] leading-relaxed text-sky-900">
                           {scrapeProgress.map((line, j) => {
@@ -538,12 +575,12 @@ function NewAgentModal({
 
 function ApprovalCard({
   proposal,
-  onApprove,
+  onProceedToPay,
   onReject,
   loading,
 }: {
   proposal: PurchaseProposal;
-  onApprove: () => void;
+  onProceedToPay: () => void;
   onReject: () => void;
   loading: boolean;
 }) {
@@ -599,38 +636,13 @@ function ApprovalCard({
         </button>
         <button
           type="button"
-          onClick={onApprove}
+          onClick={onProceedToPay}
           disabled={loading}
           className="flex-1 rounded-xl bg-brand-600 px-3 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
         >
-          {loading ? "Confirming…" : "Yes, buy it"}
+          {loading ? "Loading…" : "Yes, buy it"}
         </button>
       </div>
-    </div>
-  );
-}
-
-function PayNowPanel({ payload }: { payload: PayNowPayload | null }) {
-  if (!payload) {
-    return (
-      <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-        <h3 className="mb-2 font-semibold">PayNow Gen 2 Payload</h3>
-        <p className="text-sm text-slate-500">Run an agent to see structured settlement JSON.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-      <div className="mb-3 flex items-center justify-between">
-        <h3 className="font-semibold">PayNow Gen 2 Payload</h3>
-        <span className="rounded-full bg-brand-50 px-2 py-0.5 text-xs font-medium text-brand-700">
-          REQUEST_TO_PAY
-        </span>
-      </div>
-      <pre className="max-h-64 overflow-auto rounded-xl bg-slate-900 p-4 text-xs text-emerald-300">
-        {JSON.stringify(payload, null, 2)}
-      </pre>
     </div>
   );
 }
@@ -655,6 +667,8 @@ export default function DashboardApp() {
     proposal: PurchaseProposal;
   } | null>(null);
   const [approvalLoading, setApprovalLoading] = useState(false);
+  const [bankModalOpen, setBankModalOpen] = useState(false);
+  const [paynowPreview, setPaynowPreview] = useState<PayNowPreview | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const runEventsUnsubRef = useRef<(() => void) | null>(null);
@@ -748,6 +762,10 @@ export default function DashboardApp() {
         if (ev.step === "complete" && ev.data && typeof ev.data === "object") {
           const data = ev.data as { paynow?: PayNowPayload };
           if (data.paynow) setLastPayNow(data.paynow);
+        }
+        if (ev.step === "settle" && ev.data && typeof ev.data === "object") {
+          const data = ev.data as { paynow?: PayNowPayload };
+          if (data.paynow?.status === "COMPLETED") setLastPayNow(data.paynow);
         }
         if (ev.step === "complete") {
           pushToast(ev.message || `${agent.name} finished — inventory updated`, "success");
@@ -863,13 +881,29 @@ export default function DashboardApp() {
     setActivityOpen(true);
   };
 
-  const handleApprove = async () => {
+  const handleProceedToPay = async () => {
+    if (!activeRunId || approvalLoading) return;
+    setApprovalLoading(true);
+    try {
+      const preview = await fetchPayNowPreview(activeRunId);
+      setPaynowPreview(preview);
+      setBankModalOpen(true);
+    } catch {
+      addLog("Failed to load PayNow preview", "error");
+    } finally {
+      setApprovalLoading(false);
+    }
+  };
+
+  const handleBankConfirm = async () => {
     if (!activeRunId || approvalLoading) return;
     setApprovalLoading(true);
     try {
       await approveRun(activeRunId);
+      setBankModalOpen(false);
+      setPaynowPreview(null);
     } catch {
-      addLog("Failed to approve purchase", "error");
+      addLog("Failed to confirm payment", "error");
     } finally {
       setApprovalLoading(false);
     }
@@ -896,6 +930,8 @@ export default function DashboardApp() {
   };
 
   const activeAgents = state?.agents.filter((a) => a.status === "ready" || a.status === "running").length ?? 0;
+  const latestPayNow =
+    lastPayNow ?? state?.transactions.find((tx) => tx.paynowPayload)?.paynowPayload ?? null;
 
   return (
     <div className="flex min-h-screen">
@@ -928,6 +964,39 @@ export default function DashboardApp() {
           >
             <Package className="h-4 w-4" /> Inventory
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("payments")}
+            className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium ${
+              activeTab === "payments"
+                ? "bg-brand-50 text-brand-700"
+                : "text-slate-600 hover:bg-slate-50"
+            }`}
+          >
+            <Receipt className="h-4 w-4" /> Payments
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("integrations")}
+            className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium ${
+              activeTab === "integrations"
+                ? "bg-brand-50 text-brand-700"
+                : "text-slate-600 hover:bg-slate-50"
+            }`}
+          >
+            <Plug className="h-4 w-4" /> Integrations
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("settings")}
+            className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium ${
+              activeTab === "settings"
+                ? "bg-brand-50 text-brand-700"
+                : "text-slate-600 hover:bg-slate-50"
+            }`}
+          >
+            <Settings className="h-4 w-4" /> Settings
+          </button>
         </nav>
         <div className="mt-auto space-y-3 rounded-xl border border-slate-100 bg-slate-50 p-3 text-xs text-slate-600">
           <div className="flex items-center gap-2">
@@ -949,14 +1018,8 @@ export default function DashboardApp() {
       <div className="flex flex-1 flex-col">
         <header className="flex items-center justify-between border-b border-slate-200 bg-white px-6 py-4">
           <div>
-            <h1 className="text-xl font-semibold">
-              {activeTab === "dashboard" ? "Dashboard" : "Inventory"}
-            </h1>
-            <p className="text-sm text-slate-500">
-              {activeTab === "dashboard"
-                ? "Zero-code agentic commerce for Singapore SMEs"
-                : "Track stock levels and auto-trigger purchasing agents"}
-            </p>
+            <h1 className="text-xl font-semibold">{TAB_META[activeTab].title}</h1>
+            <p className="text-sm text-slate-500">{TAB_META[activeTab].subtitle}</p>
           </div>
           <div className="flex items-center gap-3">
             <span
@@ -1122,60 +1185,20 @@ export default function DashboardApp() {
             </div>
           </div>
 
-          <div className="grid gap-6 lg:grid-cols-2">
-            {/* Transactions */}
-            <div className="rounded-2xl border border-slate-200 bg-white shadow-sm">
-              <div className="border-b border-slate-100 px-5 py-4">
-                <h2 className="font-semibold">Recent Transactions</h2>
-              </div>
-              <div className="divide-y divide-slate-50">
-                {state?.transactions.length === 0 ? (
-                  <p className="p-5 text-sm text-slate-400">No transactions yet.</p>
-                ) : (
-                  state?.transactions.map((tx) => {
-                    const badge = sourceLabel(tx.source, tx.paynowPayload?.creditor?.name);
-                    const supplier = tx.paynowPayload?.creditor?.name;
-                    return (
-                    <div key={tx.id} className="flex items-start justify-between gap-4 px-5 py-4">
-                      <div className="min-w-0 flex-1">
-                        <div className="font-medium capitalize">{tx.description}</div>
-                        <div className="text-xs text-slate-400">{tx.agentName}</div>
-                        {supplier && (
-                          <div className="mt-1 text-xs text-slate-600">Seller: {supplier}</div>
-                        )}
-                        <span className={`mt-2 inline-block rounded-full px-2 py-0.5 text-xs font-medium ${badge.className}`}>
-                          {badge.text}
-                        </span>
-                        {tx.url ? (
-                          <a
-                            href={tx.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="mt-1 block break-all text-xs text-brand-600 hover:underline"
-                          >
-                            {tx.url}
-                          </a>
-                        ) : (
-                          <p className="mt-1 text-xs text-slate-400">No listing URL — add EXA_API_KEY for live Shopee links</p>
-                        )}
-                      </div>
-                      <div className="shrink-0 text-right">
-                        <div className="font-medium text-red-600">− {formatMoney(tx.amount)}</div>
-                        <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs text-emerald-700">
-                          {tx.status}
-                        </span>
-                      </div>
-                    </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-
-            <PayNowPanel payload={lastPayNow} />
+          <div className="max-w-xl">
+            <PayNowReceipt payload={latestPayNow} />
+            {(state?.transactions.length ?? 0) > 0 && (
+              <button
+                type="button"
+                onClick={() => setActiveTab("payments")}
+                className="mt-3 text-sm font-medium text-brand-600 hover:text-brand-700 hover:underline"
+              >
+                View all payments ({state?.transactions.length}) →
+              </button>
+            )}
           </div>
         </main>
-        ) : (
+        ) : activeTab === "inventory" ? (
           state && (
             <InventoryView
               state={state}
@@ -1190,6 +1213,21 @@ export default function DashboardApp() {
               runningId={runningId}
             />
           )
+        ) : activeTab === "payments" ? (
+          state && <PaymentsView state={state} />
+        ) : activeTab === "settings" ? (
+          state && (
+            <SettingsView profile={state.businessProfile} onRefresh={refresh} onToast={pushToast} />
+          )
+        ) : (
+          <IntegrationsView
+            onAgentCreated={() => {
+              void refresh();
+            }}
+            onAgentRun={handleInventoryTriggeredRun}
+            onGoToDashboard={() => setActiveTab("dashboard")}
+            onToast={pushToast}
+          />
         )}
 
         <footer className="border-t border-slate-200 px-6 py-3 text-center text-xs text-slate-400">
@@ -1218,9 +1256,22 @@ export default function DashboardApp() {
         pendingApproval={
           pendingApproval && viewingAgentId === pendingApproval.agent.agentId ? pendingApproval.proposal : null
         }
-        onApprove={handleApprove}
+        onProceedToPay={handleProceedToPay}
         onReject={handleReject}
         approvalLoading={approvalLoading}
+      />
+
+      <PayNowBankModal
+        open={bankModalOpen}
+        preview={paynowPreview}
+        loading={approvalLoading}
+        onClose={() => {
+          if (!approvalLoading) {
+            setBankModalOpen(false);
+            setPaynowPreview(null);
+          }
+        }}
+        onConfirm={handleBankConfirm}
       />
 
       <ToastStack toasts={toasts} onDismiss={dismissToast} />

@@ -9,7 +9,7 @@ import {
   updateAgent,
 } from "../store.js";
 import { scrapePrice, formatScrapeMessage } from "./exaScrape.js";
-import { buildPayNowSettlement } from "./paynowSettlement.js";
+import { runSettlementSimulation } from "./paynowSettlementSimulator.js";
 import { buildProposal, waitForRunApproval } from "./runApproval.js";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -128,16 +128,13 @@ export async function runAgent(agent: Agent, runId: string): Promise<void> {
 
     emitRunEvent(
       runId,
-      event(runId, "approval", "Approved — proceeding to PayNow", "done", { proposal, approved: true })
+      event(runId, "approval", "Approved — opening PayNow settlement", "done", { proposal, approved: true })
     );
 
-    emitRunEvent(
-      runId,
-      event(runId, "settle", "Generating PayNow Gen 2 settlement...", "running")
+    const paynow = await runSettlementSimulation(runId, agent, scrape, (ev) =>
+      emitRunEvent(runId, ev)
     );
-    await delay(600);
 
-    const paynow = buildPayNowSettlement(agent, scrape);
     deductBalance(scrape.price);
 
     const tx: Transaction = {

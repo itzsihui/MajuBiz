@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import type { Agent } from "../types.js";
+import { businessContextForAgents } from "./businessProfile.js";
 import { extractIntentModifiers, isLikelyWrongSubtype } from "./productMatch.js";
 export interface ListingOption {
   index: number;
@@ -83,7 +84,7 @@ function fallbackBrain(agent: Agent, options: ListingOption[]): BrainDecision {
     `Cheapest relevant option: S$${cheapest.totalPrice.toFixed(2)} (${cheapest.title.slice(0, 40)}…)`,
   );
 
-  const underBudget = cheapest.totalPrice < agent.trigger.threshold;
+  const underBudget = cheapest.totalPrice <= agent.trigger.threshold;
   if (!underBudget) {
     thoughts.push(
       `Cheapest is S$${cheapest.totalPrice.toFixed(2)} but budget cap is S$${agent.trigger.threshold.toFixed(2)} — no purchase`,
@@ -173,6 +174,9 @@ Rules:
           role: "user",
           content: `Owner's original request:
 "${agent.prompt}"
+
+Business profile (use for delivery context if relevant):
+${businessContextForAgents()}
 
 Parsed product: "${agent.product}"
 Quantity: ${agent.quantity} ${agent.unit}

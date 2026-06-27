@@ -40,6 +40,20 @@ export interface PayNowPayload {
     triggerReason: string;
     scrapeProvider: string;
   };
+  debtor?: {
+    businessName: string;
+    uen: string;
+    contactName: string;
+    contactEmail: string;
+    contactPhone: string;
+  };
+  shipping?: {
+    addressLine1: string;
+    addressLine2?: string;
+    postalCode: string;
+    city: string;
+    country: string;
+  };
   status: string;
   settledAt: string;
 }
@@ -65,6 +79,7 @@ export interface DashboardState {
   transactions: Transaction[];
   inventory: InventoryItem[];
   inventorySettings: InventorySettings;
+  businessProfile: BusinessProfile;
 }
 
 export interface InventoryItem {
@@ -79,6 +94,19 @@ export interface InventoryItem {
 
 export interface InventorySettings {
   autoSearchEnabled: boolean;
+}
+
+export interface BusinessProfile {
+  businessName: string;
+  uen: string;
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string;
+  shippingAddressLine1: string;
+  shippingAddressLine2: string;
+  postalCode: string;
+  city: string;
+  country: string;
 }
 
 export interface UpdateInventoryResult {
@@ -122,6 +150,22 @@ export interface PurchaseProposal {
   source?: string;
 }
 
+export interface PayNowPreview {
+  settlementId: string;
+  creditorName: string;
+  creditorUen: string;
+  amount: number;
+  currency: string;
+  reconciliationRef: string;
+  invoiceNumber: string;
+  product: string;
+  quantity: number;
+  unit: string;
+  lineItems: PayNowPayload["structuredRemittance"]["lineItems"];
+  debtorName?: string;
+  shipTo?: string;
+}
+
 const API_BASE = import.meta.env.VITE_API_URL ?? "";
 
 export async function fetchState(): Promise<DashboardState> {
@@ -130,14 +174,32 @@ export async function fetchState(): Promise<DashboardState> {
   return res.json();
 }
 
-export async function parseAgent(prompt: string) {
-  const res = await fetch(`${API_BASE}/api/agents/parse`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt }),
-  });
-  if (!res.ok) throw new Error("Failed to create agent");
-  return res.json();
+export interface ParseAgentResult {
+  agent: Agent;
+  parseProvider: "openai" | "fallback";
+  message: string;
+}
+
+export async function parseAgent(prompt: string): Promise<ParseAgentResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/api/agents/parse`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ prompt }),
+    });
+  } catch {
+    throw new Error("Can't reach MajuBiz server — check that the API is running.");
+  }
+
+  const data = (await res.json().catch(() => ({}))) as Partial<ParseAgentResult> & { error?: string };
+  if (!res.ok) {
+    throw new Error(data.error ?? `Failed to create agent (${res.status})`);
+  }
+  if (!data.agent?.agentId) {
+    throw new Error("Server returned an invalid agent — try again.");
+  }
+  return data as ParseAgentResult;
 }
 
 export async function runAgent(agentId: string): Promise<{ runId: string }> {
@@ -164,6 +226,12 @@ export async function approveRun(runId: string): Promise<void> {
 export async function rejectRun(runId: string): Promise<void> {
   const res = await fetch(`${API_BASE}/api/runs/${runId}/reject`, { method: "POST" });
   if (!res.ok) throw new Error("Failed to reject purchase");
+}
+
+export async function fetchPayNowPreview(runId: string): Promise<PayNowPreview> {
+  const res = await fetch(`${API_BASE}/api/runs/${runId}/paynow-preview`);
+  if (!res.ok) throw new Error("Failed to load PayNow preview");
+  return res.json();
 }
 
 export function subscribeRunEvents(
@@ -197,6 +265,19 @@ export async function updateInventorySettings(autoSearchEnabled: boolean): Promi
   if (!res.ok) throw new Error("Failed to update inventory settings");
   const data = await res.json();
   return data.settings;
+}
+
+export async function updateBusinessProfile(
+  profile: Partial<BusinessProfile>
+): Promise<BusinessProfile> {
+  const res = await fetch(`${API_BASE}/api/settings/business`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(profile),
+  });
+  if (!res.ok) throw new Error("Failed to update business profile");
+  const data = await res.json();
+  return data.profile;
 }
 
 export async function saveInventoryItem(

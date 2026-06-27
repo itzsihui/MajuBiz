@@ -6,6 +6,8 @@ import { fileURLToPath } from "url";
 import { agentsRouter } from "./routes/agents.js";
 import { inventoryRouter } from "./routes/inventory.js";
 import { marketplaceRouter } from "./routes/marketplace.js";
+import { paynowRouter } from "./routes/paynow.js";
+import { settingsRouter } from "./routes/settings.js";
 import { shopeeOpenPlatformConfigured } from "./services/shopeeOpenPlatform.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -30,6 +32,8 @@ app.get("/api/health", (_req, res) => {
 app.use("/api", agentsRouter);
 app.use("/api", inventoryRouter);
 app.use("/api", marketplaceRouter);
+app.use("/api", paynowRouter);
+app.use("/api", settingsRouter);
 
 if (isProd) {
   const clientDist = path.join(__dirname, "../../client/dist");

@@ -1,6 +1,7 @@
 import type {
   ActivityEvent,
   Agent,
+  BusinessProfile,
   DashboardState,
   InventoryItem,
   InventorySettings,
@@ -8,6 +9,19 @@ import type {
 } from "./types.js";
 
 const INITIAL_BALANCE = 500;
+
+const DEFAULT_BUSINESS_PROFILE: BusinessProfile = {
+  businessName: "Heartland Supplies Pte Ltd",
+  uen: "202412345K",
+  contactName: "Ahmad",
+  contactEmail: "orders@heartland-supplies.sg",
+  contactPhone: "+65 9123 4567",
+  shippingAddressLine1: "Blk 123 Ang Mo Kio Ave 3",
+  shippingAddressLine2: "#04-567",
+  postalCode: "560123",
+  city: "Singapore",
+  country: "Singapore",
+};
 
 export const store: DashboardState = {
   balance: INITIAL_BALANCE,
@@ -60,6 +74,7 @@ export const store: DashboardState = {
   inventorySettings: {
     autoSearchEnabled: false,
   },
+  businessProfile: { ...DEFAULT_BUSINESS_PROFILE },
 };
 
 const runEvents = new Map<string, ActivityEvent[]>();
@@ -76,6 +91,7 @@ export function getState(): DashboardState {
       maxUnitPrice: item.maxUnitPrice ?? defaultMaxUnitPrice(item.product),
     })),
     inventorySettings: { ...store.inventorySettings },
+    businessProfile: { ...store.businessProfile },
   };
 }
 
@@ -146,6 +162,15 @@ export function clearRun(runId: string): void {
 export function updateInventorySettings(settings: Partial<InventorySettings>): InventorySettings {
   store.inventorySettings = { ...store.inventorySettings, ...settings };
   return { ...store.inventorySettings };
+}
+
+export function getBusinessProfile(): BusinessProfile {
+  return { ...store.businessProfile };
+}
+
+export function updateBusinessProfile(patch: Partial<BusinessProfile>): BusinessProfile {
+  store.businessProfile = { ...store.businessProfile, ...patch };
+  return { ...store.businessProfile };
 }
 
 export function updateInventoryItem(

@@ -70,6 +70,20 @@ export interface PayNowPayload {
     triggerReason: string;
     scrapeProvider: string;
   };
+  debtor?: {
+    businessName: string;
+    uen: string;
+    contactName: string;
+    contactEmail: string;
+    contactPhone: string;
+  };
+  shipping?: {
+    addressLine1: string;
+    addressLine2?: string;
+    postalCode: string;
+    city: string;
+    country: string;
+  };
   status: string;
   settledAt: string;
 }
@@ -120,6 +134,19 @@ export interface InventorySettings {
   autoSearchEnabled: boolean;
 }
 
+export interface BusinessProfile {
+  businessName: string;
+  uen: string;
+  contactName: string;
+  contactEmail: string;
+  contactPhone: string;
+  shippingAddressLine1: string;
+  shippingAddressLine2: string;
+  postalCode: string;
+  city: string;
+  country: string;
+}
+
 export interface DashboardState {
   balance: number;
   currency: "SGD";
@@ -127,4 +154,5 @@ export interface DashboardState {
   transactions: Transaction[];
   inventory: InventoryItem[];
   inventorySettings: InventorySettings;
+  businessProfile: BusinessProfile;
 }

@@ -1,4 +1,5 @@
 import type { Agent, PayNowPayload, ScrapeResult } from "../types.js";
+import { getBusinessProfile } from "../store.js";
 import { getOrCreateSellerAgent } from "./dynamicSellerAgent.js";
 
 function randomRef(): string {
@@ -10,6 +11,7 @@ export function buildPayNowSettlement(agent: Agent, scrape: ScrapeResult): PayNo
   const sellerAgent = scrape.source === "seller-agent" ? getOrCreateSellerAgent(agent) : undefined;
   const creditorName = scrape.sellerName ?? scrape.supplier;
   const creditorUen = sellerAgent?.uen ?? "201234567A";
+  const profile = getBusinessProfile();
 
   return {
     scheme: "PayNow-Gen2",
@@ -39,6 +41,20 @@ export function buildPayNowSettlement(agent: Agent, scrape: ScrapeResult): PayNo
       agentId: agent.agentId,
       triggerReason: `Price S$${scrape.price.toFixed(2)} below threshold S$${agent.trigger.threshold.toFixed(2)}`,
       scrapeProvider: scrape.source,
+    },
+    debtor: {
+      businessName: profile.businessName,
+      uen: profile.uen,
+      contactName: profile.contactName,
+      contactEmail: profile.contactEmail,
+      contactPhone: profile.contactPhone,
+    },
+    shipping: {
+      addressLine1: profile.shippingAddressLine1,
+      addressLine2: profile.shippingAddressLine2 || undefined,
+      postalCode: profile.postalCode,
+      city: profile.city,
+      country: profile.country,
     },
     status: "COMPLETED",
     settledAt: new Date().toISOString(),
